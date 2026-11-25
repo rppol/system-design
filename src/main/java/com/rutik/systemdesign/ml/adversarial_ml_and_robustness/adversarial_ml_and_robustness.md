@@ -43,6 +43,18 @@ Key insight: adversarial examples exist largely *because* models are too linear 
 5. **There is no free robustness.** Adversarial training and certified defenses cost clean accuracy and compute. Security is a deliberate trade, not a default.
 6. **Defense in depth.** No single defense suffices; combine input validation, robust training, monitoring for anomalous query patterns, and rate limiting.
 
+**Why a tiny L-infinity budget is enough — the linearity argument.** Goodfellow, Shlens and Szegedy ("Explaining and Harnessing Adversarial Examples", ICLR 2015) explain principle 2 with a linear score `w·x`. Perturb every feature by at most ε in the direction of its weight, η = ε·sign(w):
+
+```
+w·(x + η) = w·x + ε · Σ|w_i| = w·x + ε · ||w||_1
+
+||w||_1 grows with the number of features d: with average |w_i| = m, the shift is ε · m · d
+MNIST-sized input, d = 784, ε = 0.1 (on a 0-1 pixel scale), m = 0.1 (illustrative):
+shift = 0.1 x 0.1 x 784 = 7.84 logits, while no single pixel moved more than 0.1
+```
+
+The per-feature change is invisible, but it is aligned with the weights in every one of 784 dimensions, so the effects add instead of cancelling. This is why FGSM, which takes exactly the step `ε · sign(∇x L)`, works on deep networks that behave close to linearly around an input, and why high-dimensional inputs (images, audio) are the easiest to attack at a fixed ε.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -841,14 +853,37 @@ decision (+ low-confidence -> human moderation queue)
 **Broken -> fix during the build:** the team first tried JPEG-compressing every upload to "wash out" the perturbation, and saw robust accuracy jump to 0.70 — but this was gradient masking.
 
 ```python
-# BROKEN: input preprocessing as the defense
-defended = model(jpeg_compress(x))   # white-box PGD struggles -> looks robust
+# BROKEN: input preprocessing as the defense, scored with an attack that cannot see through it
+import torch
 
-# An adaptive attacker using BPDA (treat JPEG as identity on the backward pass)
-# drove robust accuracy back to ~0.06. FIX: keep preprocessing only as a minor
-# layer, and base the real defense on adversarial training evaluated with adaptive
-# attacks.
+def defended(x: torch.Tensor) -> torch.Tensor:
+    return model(jpeg_compress(x, quality=75))        # JPEG round-trip is not differentiable
+
+x_adv = pgd_attack(defended, x, y, eps=8 / 255, steps=40)   # gradients through JPEG ~ 0
+robust_acc = (defended(x_adv).argmax(1) == y).float().mean()  # ~0.70 -- gradient masking
 ```
+
+```python
+# FIX: score the defense with an adaptive attack (BPDA), then defend by adversarial training
+class JpegBPDA(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        return jpeg_compress(x, quality=75)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> torch.Tensor:
+        return grad                                   # treat JPEG as identity on the way back
+
+def defended_bpda(x: torch.Tensor) -> torch.Tensor:
+    return model(JpegBPDA.apply(x))
+
+x_adv = pgd_attack(defended_bpda, x, y, eps=8 / 255, steps=40)
+robust_acc = (defended(x_adv).argmax(1) == y).float().mean()  # ~0.06 -- the real number
+# The deployed defense: PGD adversarial training (train on pgd_attack(model, x, y) each batch),
+# evaluated with the same adaptive attack; JPEG stays only as a minor extra layer.
+```
+
+The broken evaluation was silent because nothing failed: PGD ran, returned perturbed images, and reported 0.70. The JPEG step simply returned near-zero gradients, so the attack never found a direction to move in. That is gradient masking, not robustness. BPDA replaces the non-differentiable step with the identity on the backward pass, which gives the attacker a usable gradient again and exposes the true robust accuracy of ~0.06. The rule that follows: score every defense with an attack adapted to it.
 
 **Step 4 — Monitor and re-train.** They track the rate of low-confidence predictions, near-duplicate query bursts per account, and the moderation-queue catch rate, retraining on freshly labeled evasion examples every two weeks because the adversary keeps adapting.
 

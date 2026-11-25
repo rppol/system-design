@@ -1,4 +1,6 @@
 # Design a Multi-Touch Attribution System
+## Intuition
+
 > "Attribution is like dividing credit for a team goal — the question is whether you use a rule (the scorer gets 100%) or a model (everyone who touched the ball gets partial credit proportional to their causal contribution)."
 
 **Key insight:** All rule-based attribution models (first-touch, last-touch, linear, time-decay) are wrong by construction — they assign credit deterministically without estimating what would have happened without each channel. The only valid attribution framework is counterfactual: "how much did this channel *cause* conversions that would not have happened otherwise?" Getting this right is worth tens of millions in annual media budget reallocation.
@@ -6,6 +8,25 @@
 Mental model: A customer sees a display ad (day 1), searches organically (day 5), clicks a retargeting ad (day 7), and converts on day 9. Last-touch gives 100% credit to retargeting. But was the retargeting ad *causal* — would the customer have converted without it? Maybe the organic search was the decisive moment, and retargeting merely coincided with an inevitable conversion. Data-driven attribution tries to answer this counterfactual question using the distribution of conversion paths across all customers.
 
 Why this system exists: Marketing teams allocate budgets across channels (paid search, paid social, display, email, organic, affiliate) based on attributed revenue. A 10% shift in attribution credit can justify $50M reallocation of annual media spend at a large e-commerce company.
+
+**The uncomfortable core: path data cannot see the counterfactual.** Retargeting is shown to people who already looked at a product, so they convert more whether or not they see the ad. Every path-level model — Markov, Shapley, an LSTM — learns from who converted, and selection bias looks exactly like causal effect in that data. §4.5 shows a subtler failure on top of that: a Shapley implementation whose characteristic function only counts converting paths is mathematically identical to linear attribution, however many permutations it samples. §4.6 then does the only thing that fixes selection: it measures incrementality with a randomized holdout and calibrates the model's credit to it.
+
+**Mental model for the whole system: three instruments, one truth.** Path-level attribution is high-resolution but biased (campaign- and creative-level, daily). Media mix modelling is low-resolution but sees offline channels and saturation (channel-level, weekly). Randomized holdouts are unbiased but expensive and slow (one channel per quarter). A principal design uses all three and lets the experiment set the scale for the other two (§5 Decision 6).
+
+**What this study is not.** Running the experiments themselves — assignment, exposure logging, sequential testing — is [Design an Experimentation Platform](design_experimentation_platform.md). Predicting whether an impression will be clicked, which consumes attribution-derived conversion values as labels, is [Design an Ads Click Prediction System](design_ads_click_prediction.md). Valuing the customer the conversion produced is [Design a Customer LTV Prediction System](design_customer_ltv_prediction.md).
+
+**Vocabulary used throughout:**
+
+| Term | Meaning |
+|---|---|
+| Touchpoint | One marketing interaction on a user's path (impression, click, email open) |
+| Characteristic function `v(S)` | In Shapley attribution, the value produced by a coalition `S` of channels |
+| Removal effect | Markov: share of conversion probability lost when a channel's node is deleted |
+| Incrementality | Conversions that would not have happened without the channel; measured by a holdout |
+| Calibration factor | Holdout-measured incremental conversions divided by model-attributed conversions, per channel |
+| MMM | Media mix model: regression of aggregate outcomes on spend with adstock and saturation |
+| View-through | Credit for an ad impression that was not clicked |
+| Lookback window | How far before the conversion touchpoints are still counted |
 
 ---
 
@@ -29,6 +50,17 @@ Why this system exists: Marketing teams allocate budgets across channels (paid s
 - Media mix modeling (MMM) — separate system operating at aggregate spend/revenue level, not user-path level.
 - Offline touchpoints (TV, radio, out-of-home) — cannot be tied to individual customer paths.
 - Real-time attribution (fraud detection requires real-time signal but attribution is a post-hoc analysis).
+
+**Clarifying questions that change the design:**
+
+| Question | If the answer is... | Design consequence |
+|---|---|---|
+| What decision will the credit drive, and how often? | Daily bid changes inside paid search | Path-level MTA at campaign granularity, calibrated (§4.6) |
+| | Quarterly TV vs digital split | MMM, not MTA (§5 Decision 6) |
+| Can we randomize exposure for any channel? | User-level holdouts on Meta and Google | Calibration factors per channel each quarter |
+| What share of users are logged in? | 40% | Unstitched cross-device paths are a first-class reported bucket (Decision 4) |
+| Which consent regimes apply (ATT, GDPR, ePrivacy)? | EU and iOS traffic is large | Consent state in every event; modelled vs observed conversions reported separately (§8) |
+| Does finance reconcile attributed revenue to booked revenue? | Yes, monthly | Attributed totals must sum to booked revenue within 1% (runbook 2 dedup) |
 
 ---
 
@@ -181,6 +213,18 @@ def build_conversion_paths(
 
     return paths
 ```
+
+**Path-construction rules that silently move credit.** Each rule below is a one-line choice in `build_conversion_paths`, and each changes channel credit more than switching from Markov to Shapley does:
+
+| Rule | Choice in this design | What goes wrong with the other choice |
+|---|---|---|
+| Multiple conversions per user | One path per conversion; touches after conversion N start path N+1 | `dict(zip(user_id, converted_at))` keeps only the last conversion, so earlier purchases lose their paths and every touch is credited to the final one |
+| Post-conversion events | Excluded (receipts, order-status emails) | Pitfall 3: the company's own confirmation emails get credit |
+| Same-channel repeats | Dedup within 1 hour | Frequency-capped display looks like 10 touches and dominates Markov transitions |
+| Non-converter cutoff | Last touch, censored at the lookback window | Using "today" as the cutoff for everyone lengthens non-converting paths and inflates removal effects for upper-funnel channels |
+| Organic and direct visits | Kept as states, never credited as paid | Dropping them makes paid channels absorb credit for users who came back on their own |
+
+The first row is a real bug in the simplified code above: `conversion_times` holds one timestamp per user. Production path construction keys on `conversion_id`, not `user_id`.
 
 ### 4.2 Markov Chain Attribution
 
@@ -466,6 +510,128 @@ def _get_conversion_rate(geos: list[str], days: int) -> np.ndarray:
     return np.array([0.02 + 0.001 * (hash(g) % 10) for g in geos])
 ```
 
+### 4.5 The Shapley Characteristic Function — the bug that turns Shapley into linear attribution
+
+Shapley attribution is only as good as `v(S)`, the value a coalition of channels produces. The `_build_conversion_value_fn` in §4.3 defines `v(S)` as "total value of converting paths that touch at least one channel in `S`". That function is a sum of one "OR game" per converting path, and the Shapley value of an OR game splits its value equally among the channels on the path. So the Monte Carlo sampler in §4.3 converges, very expensively, to **linear attribution**. Non-converting paths never enter it, so it cannot tell a channel that raises conversion probability from one that merely appears on converting paths.
+
+The runnable simulation below has a known ground truth. Display, search and email have real causal lifts; retargeting has **zero** effect but is aimed at high-intent users, the selection pattern of real retargeting.
+
+```python
+from __future__ import annotations
+
+from math import factorial
+
+import numpy as np
+
+CHANNELS = ["display", "search", "email", "retargeting"]
+TRUE_LIFT = np.array([0.020, 0.030, 0.010, 0.0])        # causal lift in conversion probability
+rng = np.random.default_rng(1)
+N = 200_000
+
+intent = rng.random(N) < 0.20                           # unobserved
+exposed = np.column_stack([
+    rng.random(N) < 0.50,                               # display: untargeted
+    rng.random(N) < np.where(intent, 0.60, 0.20),       # search: intent-driven
+    rng.random(N) < 0.30,                               # email: untargeted
+    rng.random(N) < np.where(intent, 0.70, 0.05),       # retargeting: aimed at intent
+])
+p_convert = 0.005 + 0.04 * intent + exposed @ TRUE_LIFT
+converted = rng.random(N) < p_convert
+bits = (exposed * (1 << np.arange(4))).sum(axis=1)      # touched channel set as a bitmask
+K = len(CHANNELS)
+
+
+def shapley(v: dict[int, float], n: int = K) -> np.ndarray:
+    """Exact Shapley values; fine for a handful of channels (2^n coalitions)."""
+    phi = np.zeros(n)
+    for i in range(n):
+        for s in range(1 << n):
+            if s & (1 << i):
+                continue
+            k = bin(s).count("1")
+            weight = factorial(k) * factorial(n - k - 1) / factorial(n)
+            phi[i] += weight * (v[s | (1 << i)] - v[s])
+    return phi
+
+
+# BROKEN: v(S) = converters whose path touches any channel in S (the §4.3 definition).
+v_coverage = {s: float(np.sum(converted & ((bits & s) != 0))) for s in range(1 << K)}
+
+
+def linear_attribution() -> np.ndarray:
+    credit = np.zeros(K)
+    for b in bits[converted]:
+        members = [i for i in range(K) if b >> i & 1]
+        for i in members:
+            credit[i] += 1.0 / len(members)
+    return credit
+
+
+# FIX: v(S) = expected conversions if every user kept only the channels in S that they saw,
+# using conversion rates estimated from converting AND non-converting users.
+rate_by_set = np.array([converted[bits == s].mean() for s in range(1 << K)])
+v_probability = {s: float(rate_by_set[bits & s].sum()) for s in range(1 << K)}
+
+true_incremental = TRUE_LIFT * exposed.sum(axis=0)
+for name, credit in (
+    ("ground truth", true_incremental),
+    ("broken Shapley", shapley(v_coverage)),
+    ("linear split", linear_attribution()),
+    ("probability Shapley", shapley(v_probability)),
+):
+    print(f"{name:>20}:", dict(zip(CHANNELS, credit.round(0))))
+```
+
+What the four rows show:
+
+- **Ground truth** is computable by hand: display `0.02 x 100,000 = 2,000`, search `0.03 x 56,000 = 1,680` (search reaches 60% of the 40,000 high-intent and 20% of the 160,000 others), email `0.01 x 60,000 = 600`, retargeting `0`.
+- **Broken Shapley equals the linear split** to the last decimal, which is the identity above made visible. It hands retargeting a large share, because retargeting sits on many converting paths.
+- **Probability Shapley** uses non-converters, so untargeted channels (display, email) land near their true lifts. It still credits retargeting and over-credits search, because users who saw them convert more for a reason the data cannot see (intent). That is not a bug in the code; it is the limit of observational data, and the reason §4.6 exists. Google's legacy GA360 data-driven attribution documentation describes the same structure: conversion-probability models fitted on converting and non-converting paths, then Shapley values over them (§6).
+
+### 4.6 Calibrating Attribution to Incrementality
+
+Only randomization separates "retargeting causes conversions" from "retargeting is shown to people who convert". Withhold the channel from a random half of the users it would have reached, compare conversion rates, and rescale the model's credit to the measured effect.
+
+```python
+# Randomized holdout for retargeting, continuing the simulation in §4.5.
+eligible = exposed[:, 3]                                # users retargeting would reach
+withheld = eligible & (rng.random(N) < 0.5)
+served = eligible & ~withheld
+p_experiment = p_convert - TRUE_LIFT[3] * withheld      # withheld users lose the true effect
+conv_experiment = rng.random(N) < p_experiment
+
+rate_served, rate_withheld = conv_experiment[served].mean(), conv_experiment[withheld].mean()
+lift = rate_served - rate_withheld
+std_err = np.sqrt(
+    rate_served * (1 - rate_served) / served.sum() + rate_withheld * (1 - rate_withheld) / withheld.sum()
+)
+measured_incremental = lift * eligible.sum()
+model_credit = shapley(v_probability)[3]
+calibration_factor = max(measured_incremental, 0.0) / model_credit
+
+print(f"lift {lift:.4f} +/- {1.96 * std_err:.4f} (95% CI)")
+print(f"incremental conversions {measured_incremental:.0f} vs model credit {model_credit:.0f}")
+print(f"calibration factor for retargeting: {calibration_factor:.2f}")
+```
+
+About 36,000 users are eligible (`0.2 x 0.7 + 0.8 x 0.05 = 18%` of 200,000), so each arm has ~18,000 users and the 95% interval on the lift is roughly +/-0.5 percentage points. The measured lift is indistinguishable from zero, and the calibration factor collapses retargeting's credit toward 0, while the path model alone kept insisting on a large share. Production applies the same arithmetic per channel:
+
+| Step | Rule |
+|---|---|
+| Measure | One randomized holdout (user-level where the platform supports it, geo-level otherwise) per major channel per quarter |
+| Factor | `calibration_factor = holdout incremental conversions / model-attributed conversions`, clipped to [0, 2] |
+| Apply | Daily path-level credit x the channel's latest factor; untested channels keep factor 1.0 and are flagged "uncalibrated" in every report |
+| Expire | A factor older than 2 quarters reverts to "uncalibrated"; creative, targeting and auction conditions drift |
+
+The experiment design (power, geo matching, pre-period difference-in-differences) is in [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md). The calibration step is the same idea as rescaling a classifier's scores to observed frequencies, applied to channel credit instead of probabilities; [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md) covers the general method and its failure modes, including the one that matters most here: a factor fitted on one quarter's conditions applied to a very different quarter.
+
+### 4.7 Path State for Bidding — point-in-time, not end-of-day
+
+The bid integration in §11 looks up a user's current path (channels seen, recency, days since first touch) at bid time and asks the model for the incremental conversion probability of one more touch. Two constraints come from the feature-store world:
+
+- **Training rows must use the path as it was at the decision time.** If the daily batch path (which includes touches *after* the bid) is joined to historical bid requests, the model learns from the future: a bid placed on day 3 sees the day-7 retargeting click. Build training data by replaying events up to each bid's timestamp, the point-in-time join described in [Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md).
+- **The online path state must be updated on the same event stream the batch uses**, with the same 1-hour same-channel dedup rule as §4.1. A streaming path that dedups differently from the training path is training/serving skew with a direct budget consequence.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -506,11 +672,26 @@ Without identity resolution, a customer who sees an ad on mobile and converts on
 
 Including ad impressions (view-through) in paths dramatically inflates display/video attribution because almost every internet user sees display ads. Standard industry practice: count impressions with 1-day or 7-day view-through window (configurable), apply a view-weighting factor of 0.1–0.2× the click weight. Validate against holdout tests.
 
+**Decision 6: Which instrument answers which question — MTA, MMM, or experiments?**
+
+| Question | Best instrument | Why the others fail |
+|---|---|---|
+| Which creative or keyword inside paid search should get more budget tomorrow? | Path-level MTA, calibrated | MMM cannot resolve below channel; experiments are too slow for daily decisions |
+| How much to spend on TV vs digital next quarter? | MMM (e.g. Robyn, `pymc-marketing`) calibrated with experiments | MTA cannot see TV; per-channel holdouts cannot measure saturation curves |
+| Does retargeting cause any conversions at all? | Randomized holdout | Both MTA and MMM confuse retargeting's targeting with its effect |
+| Is the attribution model still right? | Holdout vs calibrated MTA, quarterly | Comparing two observational models only measures their agreement |
+
+The rule this design follows: experiments set the level, MMM sets the channel-level allocation and saturation, MTA distributes credit *within* a channel. When MTA and a recent holdout disagree, the holdout wins and the calibration factor changes (§4.6), never the other way round.
+
+**Decision 7: Exact Shapley over channels vs Monte Carlo over channel-positions**
+
+With the conversion-probability characteristic function (§4.5) and 10-15 channels, exact Shapley needs `2^15 = 32,768` coalitions, each a lookup in a precomputed rate table: seconds, not hours. Monte Carlo (§4.3) is only needed when the "players" are channel x position or campaign-level units (hundreds of players). Choose the player granularity first; it decides the algorithm, and most teams that "need" Monte Carlo actually need fewer, better-defined players.
+
 ---
 
 ## 6. Real-World Implementations
 
-**Google (Data-Driven Attribution / DDA):** Google documents DDA as "an algorithm based on a concept from cooperative game theory called the Shapley Value," fitted on path data from both converting and non-converting users. Key engineering advantage: because Google observes clicks and conversions inside its own ad ecosystem, its path data is unusually complete. Limitation: it only attributes credit within Google-observable channels — external channels (Meta, email) are invisible to the model, so Google's view systematically overvalues Google's own channels. See [Google Analytics Help: MCF Data-Driven Attribution methodology](https://support.google.com/analytics/answer/3191594).
+**Google (Data-Driven Attribution / DDA):** Google documents DDA as "an algorithm based on a concept from cooperative game theory called the Shapley Value," fitted on path data from both converting and non-converting users. Key engineering advantage: because Google observes clicks and conversions inside its own ad ecosystem, its path data is unusually complete. Limitation: it only attributes credit within Google-observable channels — external channels (Meta, email) are invisible to the model, so Google's view systematically overvalues Google's own channels. See [Google Analytics Help: MCF Data-Driven Attribution methodology](https://support.google.com/analytics/answer/3191594). The same (now legacy, Universal Analytics / Analytics 360) methodology page spells out the two halves this file separates in §4.5: first, conversion-probability models built from "data from both converting *and* non-converting users"; second, Shapley values computed over those probabilities, comparing "the conversion probability of similar users who were exposed to these touchpoints, to the probability when one of the touchpoints does not occur in the path". Its worked example: Organic Search, Display and Email together give a 3% conversion probability, removing Display gives 2%, and that 50% relative increase is the basis of Display's credit. The page also notes that order matters in its model — Display before Paid Search is modelled separately from Paid Search before Display.
 
 **Meta (Robyn):** Meta Marketing Science open-sourced Robyn (public on GitHub since 2020, `facebookexperimental/Robyn`), a media mix modeling package for R that complements path-level attribution. Robyn fits ridge regression on aggregate spend with adstock and saturation (Hill) curves and calibrates against experiments, providing budget-level attribution without path-level selection bias — which matters because path-level attribution overattributes retargeting (it targets users already likely to convert and cannot observe the counterfactual).
 
@@ -519,6 +700,16 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 **Subscription services (illustrative pattern):** For subscriber acquisition, a useful design split is content-marketing attribution (a title drives a signup) versus paid channel attribution (display ads). Content attribution has to match content-exposed users to subscription events with a much looser time coupling — a title watched on Monday may drive a signup the following weekend — so it needs its own lookback window rather than the paid-channel default. Treat the specific window as a parameter to fit against holdout tests, not a constant to copy.
 
 **Position-adjusted Shapley (academic):** For high-consideration purchases (a furniture buyer may browse for weeks across many sessions and channels before buying), plain Shapley ignores where in the journey a channel appeared. Singal, Besbes, Desir, Goyal and Iyengar ("Shapley Meets Uniform: An Axiomatic Framework for Attribution in Online Advertising," WWW 2019) formalize this: under a Markovian journey model where ad actions have different impact at different funnel stages, the counterfactual-adjusted Shapley value reduces to an efficiently computable "unique-uniform" scheme — a correction to plain uniform attribution rather than a full 2^n coalition sweep.
+
+**Sources, condensed:**
+
+| Company / paper | What this file borrows | Reference |
+|---|---|---|
+| Google (MCF Data-Driven Attribution, legacy UA/360) | Conversion-probability models on converters and non-converters, Shapley over them (§4.5) | Google Analytics Help, article 3191594 |
+| Meta (Robyn) | MMM with adstock, saturation and experiment calibration (§5 Decision 6) | `facebookexperimental/Robyn` |
+| Airbnb | Unit-tested attribution rules; experiments to calibrate multi-touch credit (§4.6) | Airbnb Engineering, 2019 |
+| Singal, Besbes, Desir, Goyal, Iyengar | Position-aware, axiomatic Shapley variant | WWW 2019 |
+| Apple ATT | Opt-in requirement for IDFA from iOS 14.5 (§9 Pitfall 2) | Apple, April 2021 |
 
 ---
 
@@ -552,6 +743,13 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 2. **Attribution fractions sum > 1:** Symptom: total attributed revenue exceeds actual revenue by >5%. Diagnosis: view-through window misconfiguration counting the same conversion multiple times across devices. Resolution: add deduplication on conversion_id in path construction.
 3. **Holdout incrementality test shows large divergence from model:** Symptom: Markov assigns channel X 25% credit but geo holdout shows 8% true incrementality. Diagnosis: channel X touchpoints are concentrated late in funnel (retargeting bias — reaching users who would convert anyway). Resolution: apply counterfactual regularization: downweight channels where P(conversion | path without this channel) is already high.
 4. **Staleness from identity resolution failures:** Symptom: cross-device stitch rate drops from 45% to 20%. Diagnosis: browser cookie deprecation or login rate decline. Mitigation: increase reliance on email-based deterministic stitching; re-calibrate probabilistic graph.
+5. **Calibration factor for a channel jumps from 0.5 to 1.6 in one quarter:** Symptom: the new holdout says the channel is three times more incremental than last quarter. Diagnosis: check the experiment before the model — holdout contamination (withheld users still reached via a second ad account), a geo mismatch in the pre-period, or a real change (new creative, a competitor leaving the auction). Resolution: re-run with a fresh randomization if the pre-period difference-in-differences is not flat; never apply a factor outside [0, 2] without a second confirming test.
+
+### Consent, Privacy and Explainability
+
+- **Consent is a data-contract field, not a filter applied later.** Every touch event carries the user's consent state at collection time; path construction drops non-consented identifiers before stitching, and the share of paths lost to consent is reported per channel and platform. A channel whose consented share falls (the iOS 14.5 pattern in Pitfall 2) must not be read as a channel whose performance fell.
+- **Modelled conversions are labelled as modelled.** When unconsented conversions are estimated rather than observed, reports show observed and modelled conversions as separate columns, so a budget decision can see how much of a channel's credit is inference.
+- **Explain credit the way finance can audit it.** For each channel, publish: model credit, calibration factor and its test date, calibrated credit, and the share of paths that were unstitched or unconsented. Attribution changes budgets owned by different teams, so the explanation is part of the product; the documentation patterns are in [Responsible AI: Fairness and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md).
 
 ---
 
@@ -576,6 +774,19 @@ Last-touch hands retargeting 42% of conversions and Markov 18%, but the geo-hold
 **Pitfall 4: Lookback window mismatch creating phantom upper-funnel credit.** A travel company using a 90-day lookback discovered that 15% of conversion paths started with a display ad impression from a campaign that had ended 60 days earlier. The brand awareness created by that past campaign was real, but attributing credit to a paused campaign distorted current budget decisions. Fix: apply a decaying weight function (exponential decay with 14-day half-life) to older touchpoints.
 
 **Pitfall 5: SUTVA violation causing underfitting of synergy effects.** A CPG company's attribution model assigned independent credits to TV and digital. Holdout tests showed that geographies with both TV and digital outperformed the sum of individual channel incrementalities by 40%. Path-level models fundamentally cannot capture this synergy because they operate on individual journeys, not portfolio effects. Solution: layer a media mix model on top of path attribution, and use the MMM synergy coefficients to adjust path-level attributions upward for channels that show positive synergy effects.
+
+**Pitfall 6: A Shapley model that was linear attribution all along.** A subscription business replaced linear attribution with a "data-driven Shapley model" running 2,000 Monte Carlo permutations nightly on a 40-node Spark cluster. Channel credits moved by less than 1% versus the old linear report, which the team read as validation. The characteristic function counted only converting paths that touched the coalition (§4.5), which makes Shapley identical to linear attribution. Impact (illustrative): about $9k a month of compute for 14 months (~$126k) to reproduce a report that a SQL query already produced, and a year of budget decisions made on an unvalidated equal split. Fix: a conversion-probability characteristic function fitted on converters and non-converters, exact Shapley over 12 channels (seconds on one core), and a unit test that asserts the model's output differs from the linear split on a synthetic dataset with known lifts.
+
+**Impact summary:**
+
+| Pitfall | Mechanism | Measured or illustrative impact | Guard |
+|---|---|---|---|
+| 1 Retargeting inflation | Selection: shown to high-intent users | 42% last-touch credit vs 9% holdout; $4M reallocated, +31% blended ROAS | Holdout calibration (§4.6) |
+| 2 iOS 14.5 tracking loss | Coverage change read as performance change | 35% apparent drop in paid social for 3 months | Per-platform consented-path share |
+| 3 Order-confirmation emails in paths | Post-conversion touch counted | Email over-credited | Exclude post-purchase events |
+| 4 90-day lookback | Ended campaigns keep credit | 15% of paths started with a dead campaign | 14-day half-life decay |
+| 5 Synergy invisible to paths | Portfolio effects | TV + digital 40% above sum of parts | MMM layer |
+| 6 Coverage characteristic function | Shapley collapses to linear | ~$126k compute, 14 months of unvalidated credit | §4.5 fix and a synthetic-data unit test |
 
 ---
 
@@ -604,36 +815,91 @@ Optimization options:
 - Storage: 43 GB/day → 15.7 TB/year. Migrate older data to Glacier after 90 days.
 - Spark cluster for path construction: scale from 10 to 30 m5.xlarge executors.
 
+**Exact Shapley on the probability table (§4.5, Decision 7):**
+
+```
+Channels (players)                 = 12
+Coalitions                         = 2^12 = 4,096
+Rate table cells (exact touched sets) = up to 4,096; cells with < 200 users borrow from
+                                     their nearest superset/subset (or a logistic model)
+v(S) for all S                      = 4,096 x (one vectorised pass over 1.1M bitmasks) ~ 4.5e9 ops
+Shapley sums                        = 12 x 2,048 marginal terms = 24,576 -> negligible
+Wall clock                          = minutes on one core, vs ~45 min on 4 cores for §4.3 Monte Carlo
+```
+
+Grouping users by bitmask first (at most 4,096 distinct values) makes `v(S)` a 4,096 x 4,096 table operation instead of a pass over 1.1M paths, which brings the whole computation under a second.
+
+**Holdout power budget:** to detect a 0.3 percentage-point lift on a 7% conversion rate at 80% power and 5% two-sided significance, each arm needs about `(1.96 + 0.84)^2 x 2 x 0.07 x 0.93 / 0.003^2 = ~113,000` users. A channel that reaches 36,000 eligible users a day fills both arms in about 6-7 days of a 50/50 split, or 4-5 weeks at a 10% holdout, which is why holdouts run one channel per quarter and why the smallest channels stay "uncalibrated".
+
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: Why is last-touch attribution wrong, and what is it measuring?**
+**Short:** Last-touch measures which channel happened to come last, not which caused the sale, so it over-credits bottom-funnel channels that reach already-committed buyers.
+
 Last-touch attribution is measuring which channel happened to be the final touchpoint before conversion, not which channel *caused* the conversion. In multi-touch journeys, the last touch is often a low-funnel channel (retargeting, branded paid search) that reached users who were already committed to purchase. Last-touch systematically overattributes these bottom-funnel channels by 3–5× their true causal contribution, causing marketers to overinvest in retargeting and underinvest in awareness channels that generate demand in the first place.
 
+**Q: Your new Shapley attribution reproduces the old linear report within 1% on every channel. Is that reassuring?**
+**Short:** No, because a characteristic function that only counts converting paths touching a coalition makes Shapley mathematically identical to linear attribution.
+
+If `v(S)` is "value of converting paths that touch any channel in S", it is a sum of one OR-game per path, and the Shapley value of an OR-game splits the path's value equally among its channels. Monte Carlo sampling then converges to linear attribution at great expense, and non-converting paths never influence anything (§4.5). Define `v(S)` from conversion probabilities fitted on converting and non-converting users, as Google's legacy data-driven attribution documents, and add a unit test on synthetic data with known lifts that fails if the output equals the linear split.
 **Q: What is a removal effect in Markov attribution, and why does it approximate causal impact?**
+**Short:** It is the share of conversion probability lost when a channel's node is deleted from the transition graph; it approximates impact but still cannot see counterfactuals.
+
 The removal effect measures: if we removed all paths that include channel C, what fraction of conversions would be lost? It approximates causal impact because paths that contain channel C often contain the channel at a position that actually drove the conversion decision. The approximation is imperfect because it ignores counterfactuals — users who saw channel C and would have converted via a different path anyway. Geo holdout tests show Markov is typically within 8–15% of true incrementality, significantly better than last-touch but not perfectly causal.
 
 **Q: How do you handle the cold-start problem when a new channel is added?**
+**Short:** Give the new channel a prior from channels at the same funnel position and shrink toward observed transitions as data accumulates, about 100 pseudo-observations here.
+
 A new channel has no path history, so the Markov transition matrix has no outgoing edges from it. Use a prior: new channels start with the average conversion rate of all other channels at the same funnel position (awareness/consideration/intent). After 7 days of observed data, blend the prior with observed transitions using a weighted average that shifts toward observed data as N increases: `p_channel = (N × observed + prior_N × prior) / (N + prior_N)` where `prior_N = 100` is a regularization hyperparameter equivalent to 100 pseudo-observations.
 
 **Q: What are SUTVA violations in attribution, and how do you address them?**
+**Short:** Channels affect each other's audiences, such as display lifting brand search; measure with channel-level geo holdouts and calibrate path credit to those totals.
+
 SUTVA (Stable Unit Treatment Value Assumption) requires that one user's exposure to a channel does not affect another user's response. Attribution models violate SUTVA because channels interact: display ads increase brand search volume, which inflates paid search conversion rates even for users who never saw the display ad. Path-level models cannot capture cross-user effects. Address SUTVA by: (1) running channel-level geo holdouts to measure true incrementality including cross-channel spillover; (2) calibrating path-level Markov fractions to sum to holdout-validated totals; (3) using media mix modeling for channel interactions that path models cannot capture.
 
 **Q: How do you validate an attribution model if you can't run an A/B test on attribution itself?**
+**Short:** Run randomized holdouts that switch a channel off for some users or regions, compare the measured incremental conversions with the model's credit, and recalibrate on a gap.
+
 Use geo-holdout incrementality tests: randomly assign geographies to control (all channels running) vs holdout (one channel turned off). The true incremental contribution of the removed channel = conversion rate difference between control and holdout, adjusted for pre-period differences. Compare this to the Markov model's attribution for the same channel. If they diverge by > 20%, recalibrate the model. Additionally, track the "sanity test" — if your Markov model attributes 35% credit to organic search but organic search is a pure function of branded awareness, the attribution is plausible if you recently invested heavily in brand advertising.
 
 **Q: How do you handle cross-device attribution when users are not logged in?**
+**Short:** Stitch deterministically on login where possible, probabilistically above a tuned match score otherwise, and report the 15-25% unstitched paths separately.
+
 For anonymous users: probabilistic identity resolution using fingerprinting signals (IP address, browser type, screen resolution, timezone) combined with behavioral signals (session timing patterns). Assign probabilistic match scores between device pairs; stitch paths when match score > 0.85 (tune threshold based on false-positive tolerance). For logged-in users: deterministic matching via user ID. Accept 15–25% unstitched paths; report them separately rather than forcing them into the model, since forced stitching errors propagate into attribution fractions.
 
 **Q: What is the difference between attribution and incrementality?**
+**Short:** Attribution distributes credit for observed conversions; incrementality counts the conversions that would not have happened without the channel, which only an experiment measures.
+
 Attribution answers: "which channel gets credit for observed conversions?" Incrementality answers: "which conversions would not have happened without this channel?" Attribution is observational; incrementality is causal. Attribution models (even Markov/Shapley) give biased estimates for channels that systematically target already-intent-to-convert users (retargeting, branded search). Incrementality testing (geo holdout, user holdout) provides unbiased causal estimates but is expensive and can only be run periodically. Best practice: use attribution for day-to-day budget optimization, calibrate with incrementality tests quarterly.
 
 **Q: How do Shapley values handle channel interaction effects?**
+**Short:** Shapley averages a channel's marginal contribution over every coalition it can join, so synergy and substitution between channels change its credit.
+
 Shapley values by definition account for interaction effects: the marginal contribution of channel C in the coalition {A, B, C} is evaluated separately from C's marginal contribution in coalition {A, C} and {B, C}. If channels A and B have positive synergy (together they convert more than the sum of their individual effects), Shapley will assign higher values to both A and B compared to models that assume independence. This is Shapley's primary advantage over Markov: it correctly handles synergistic and substitutable channel pairs.
 
 **Q: How do you communicate attribution model uncertainty to marketing stakeholders?**
+**Short:** Give ranges, not points, show the latest holdout next to the model's number, and use the lower bound as the safe figure for reallocating budget.
+
 Report confidence intervals on attribution fractions: "Retargeting accounts for 18% ± 4% of attributed conversions." Use plain-language framing: "We're confident retargeting contributed between 14% and 22% of conversions." For budget reallocation decisions, use the lower bound of the confidence interval as the "safe" estimate. Present the holdout validation comparison: "Our model said retargeting contributes 18%; our geo holdout measured 15%. We consider the model well-calibrated within ±3pp." Avoid claiming the model is "more accurate" than last-touch without a specific holdout validation to back it up.
 
 **Q: How do you integrate attribution data into automated bid optimization?**
+**Short:** Keep each user's path state online, score the incremental conversion probability of one more touch at bid time, and bid that probability times order value over target ROAS.
+
 The bid optimization system (Google Ads, Meta Ads Manager) needs to know: for each user, what is the predicted conversion value of a click in this channel, given their current path? Export real-time path state to a feature store (current path channels, recency of each touch, days since first touch). For each new ad impression/bid request, look up the user's path state and compute the Markov model's incremental conversion probability given adding this channel to their existing path. Set the max bid = incremental conversion probability × expected order value × target ROAS. This requires sub-100ms response time; use a simplified Markov model with pre-computed transition probabilities in Redis.
+
+**Q: Even with non-converters in the model, retargeting still gets substantial credit while a holdout shows zero lift. Which is right, and what do you do?**
+**Short:** The holdout is right: retargeting is aimed at high-intent users, and path data cannot separate that targeting from causal effect; rescale its credit with a calibration factor.
+
+Every observational model learns that users who saw retargeting convert more, and they do, because they were selected for intent. Only randomizing who is withheld removes that selection. Compute `calibration_factor = holdout incremental conversions / model-attributed conversions` per channel, clip it to [0, 2], multiply daily path credit by it, and expire it after two quarters (§4.6). Report uncalibrated channels as such so nobody mistakes model credit for measured effect.
+
+**Q: When do you use MMM instead of multi-touch attribution?**
+**Short:** Use MMM for channel-level and offline budget allocation with saturation curves; use MTA to split credit within digital channels daily; calibrate both with experiments.
+
+MTA works on individual paths, so it cannot see TV, radio or out-of-home, and it cannot measure diminishing returns from spend. MMM regresses aggregate outcomes on spend with adstock and saturation, so it covers every channel but only at weekly, channel-level resolution. Neither is causal on its own. A practical stack lets randomized holdouts set the level, MMM set cross-channel allocation and saturation, and MTA distribute credit across campaigns and creatives inside a channel (§5 Decision 6).
+
+**Q: How large does a holdout need to be to measure a retargeting effect of 0.3 percentage points?**
+**Short:** About 113,000 users per arm at a 7% base conversion rate, 80% power and 5% significance; small channels may need a 50/50 split or a longer test.
+
+Per-arm sample size for a difference in proportions is about `(z_alpha/2 + z_beta)^2 x 2 x p(1-p) / delta^2 = 2.8^2 x 2 x 0.07 x 0.93 / 0.003^2 = ~113,000`. With 36,000 eligible users a day, a 50/50 split fills both arms in under a week, while a 10% holdout takes 4-5 weeks. Use user-level randomization where the ad platform supports it, geo-level with pre-period matching where it does not, and pre-register the minimum effect you care about before the test starts.

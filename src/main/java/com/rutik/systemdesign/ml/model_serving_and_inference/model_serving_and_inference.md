@@ -43,6 +43,8 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 
 **Hardware-model fit**: Not all models benefit equally from GPU. A 100-parameter logistic regression should serve on CPU; a 7B parameter LLM needs GPU or it will be unusably slow.
 
+**Worked example: sizing replicas with Little's law.** The number of requests in flight is arrival rate times time in system, `L = lambda x W`. At 2,000 requests/s and 40 ms per request, `L = 2,000 x 0.040 = 80` requests are in flight at any moment. If one replica can work on 8 requests at once (its batch size or worker count) and you run replicas at 70% of that to leave headroom for bursts, you need `80 / (8 x 0.7) = 14.3`, so 15 replicas, plus one per zone for N+1. The same formula shows why latency regressions are capacity regressions: if a new model takes 60 ms, `L` becomes 120 and the fleet needs 22 replicas for the same traffic.
+
 ---
 
 ## 4. Types / Architectures / Strategies

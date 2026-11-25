@@ -651,6 +651,26 @@ A model predicting rare adverse drug events (1% positive rate) achieved 99% accu
 **Pitfall 6 — Temporal data split with random shuffle**
 Time-series customer behavior data was split with random shuffle: future data leaked into training, teaching the model patterns it could not know at prediction time. Fix: always use time-based split for temporal data (train on earlier months, test on later months).
 
+**Pitfall 5 as code: accuracy on a 1% positive class.**
+
+```python
+# BROKEN: 0.99 accuracy, achieved by predicting "negative" for everyone
+from sklearn.metrics import accuracy_score
+
+print(accuracy_score(y_te, clf.predict(X_te)))
+```
+
+```python
+# FIX: report a ranking metric whose baseline is the positive rate, plus per-class recall
+from sklearn.metrics import average_precision_score, classification_report
+
+proba = clf.predict_proba(X_te)[:, 1]
+print(f"PR-AUC {average_precision_score(y_te, proba):.3f} vs baseline {y_te.mean():.3f}")
+print(classification_report(y_te, clf.predict(X_te), digits=3))
+```
+
+With 1% positives, a constant classifier scores 0.99 accuracy, so the broken metric cannot tell a useless model from a good one. PR-AUC (average precision) has a baseline equal to the positive rate, 0.01 here, and the classification report shows recall on the minority class directly. Pick the decision threshold from the costs afterwards; the default 0.5 is rarely right at this imbalance.
+
 ---
 
 ## 11. Technologies & Tools

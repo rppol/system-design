@@ -1208,3 +1208,27 @@ gen_config = {
 - Coverage attention monitoring: 3% of Arabic articles produced near-uniform attention (entropy >6.0) indicating alignment failure. Root cause: Arabic RTL encoding required explicit language token. Fixed by prepending `<ar_AR>` to source.
 - Cross-attention memory: 800 (source) × 128 (max target) × 12 layers × 16 heads × 4 bytes = 78.6MB per sequence in FP32. Using FP16 reduced to 39.3MB, so even large batches fit comfortably on a 40GB A100.
 - Production throughput: 45 articles/second (800-token source, 80-token target) on 4x A100 GPUs. Target: 50/second. Optimization: ctranslate2 FP16 inference achieved 67 articles/second.
+
+**BROKEN → FIX: tagging every source language as English.** The Arabic alignment failure above is what this bug looks like from the outside, and "prepending the language token" is done through the tokenizer, not by editing the text. mBART marks the source language with a language-code token that the tokenizer appends after `</s>`, and it takes that code from `tokenizer.src_lang`.
+
+```python
+from transformers import AutoTokenizer, BatchEncoding
+
+tok = AutoTokenizer.from_pretrained("facebook/mbart-large-cc25")   # src_lang defaults to "en_XX"
+
+# BROKEN: one tokenizer call for all 12 languages; every source ends in </s> en_XX
+batch = tok(arabic_articles, max_length=800, truncation=True, padding=True, return_tensors="pt")
+# the encoder is told Arabic text is English
+```
+
+```python
+# FIX: set the source language per batch, so the correct code token is appended
+def encode(texts: list[str], lang_code: str) -> BatchEncoding:
+    tok.src_lang = lang_code              # e.g. "ar_AR", "de_DE", "ja_XX"
+    return tok(texts, max_length=800, truncation=True, padding=True, return_tensors="pt")
+
+
+batch = encode(arabic_articles, "ar_AR")
+```
+
+Batch by source language so each batch has one `src_lang`, and keep `forced_bos_token_id` set to the `en_XX` id at generation, as in the config above, so the decoder's target language stays fixed. Checking `tok.convert_ids_to_tokens(batch["input_ids"][0])[-2:]` in a unit test (it should end in `</s>` and the language code) catches the bug before training rather than in the attention-entropy dashboards.

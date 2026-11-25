@@ -755,6 +755,26 @@ ViT CLS tokens sometimes attend to background tokens rather than the object of i
 **Pitfall 5: BatchNorm in ViT (do not)**
 Some engineers port CNN code patterns to ViT and accidentally add BatchNorm layers. ViT uses Layer Normalization, not Batch Normalization. BN computes statistics over the batch dimension, which is problematic with variable sequence lengths. LN computes statistics over the feature dimension per sample. Mixing the two causes subtle numerical instabilities and 2-4% accuracy drops.
 
+**Pitfall 1 as code: position embeddings resized as a 1-D sequence.**
+
+```python
+# BROKEN: stretch the 14x14 table (224 / 16) to 576 = 24x24 positions as if it were a line
+import torch.nn.functional as F
+
+pe = model.pos_embed[:, 1:]                                          # [1, 196, 768]
+pe_new = F.interpolate(pe.transpose(1, 2), size=576, mode="linear").transpose(1, 2)
+```
+
+```python
+# FIX: reshape to the 2-D grid, interpolate in 2-D, flatten back
+grid = pe.reshape(1, 14, 14, -1).permute(0, 3, 1, 2)                  # [1, 768, 14, 14]
+grid = F.interpolate(grid, size=(24, 24), mode="bicubic", align_corners=False)
+pe_new = grid.permute(0, 2, 3, 1).reshape(1, 24 * 24, -1)             # [1, 576, 768]
+# timm does this when loading: timm.create_model(name, pretrained=True, img_size=384)
+```
+
+The 1-D version produces a table of the right shape, so the model loads and fine-tunes. But the end of row 0 and the start of row 1 are neighbours in the flattened sequence and get blended, so the embedding for a patch no longer encodes its row and column. Fine-tuning partly relearns the geometry and the final accuracy lands a few points short. Check the shapes and the method: the grid has to be resampled as a grid.
+
 ---
 
 ## 11. Technologies & Tools
@@ -917,3 +937,40 @@ near-duplicates in the same partition, so the 64 probed lists contain nearly all
 neighbours. Push `nprobe` to 128 and you double the scan for a fraction of a recall point;
 drop it to 16 and recall falls off a cliff — that tradeoff, not the encoder, is what sets
 the P99 = 25ms budget.
+
+**BROKEN → FIX: indexing CLIP embeddings without normalizing them.** CLIP is trained on cosine similarity, so the index has to compare directions, not raw vectors.
+
+```python
+import faiss
+import numpy as np
+
+
+# BROKEN: raw embeddings into an L2 IVF index
+def build_broken(emb: np.ndarray, nlist: int = 4096) -> faiss.Index:
+    d = emb.shape[1]
+    index = faiss.IndexIVFFlat(faiss.IndexFlatL2(d), d, nlist)
+    index.train(emb)
+    index.add(emb)
+    return index   # neighbours now depend on vector NORM (lighting, crop, background), not only direction
+```
+
+```python
+# FIX: unit-normalize, then inner product == cosine; queries get the same normalization
+def build_fixed(emb: np.ndarray, nlist: int = 4096, nprobe: int = 64) -> faiss.Index:
+    x = np.ascontiguousarray(emb, dtype=np.float32)
+    faiss.normalize_L2(x)                                  # in place
+    d = x.shape[1]
+    index = faiss.IndexIVFFlat(faiss.IndexFlatIP(d), d, nlist, faiss.METRIC_INNER_PRODUCT)
+    index.train(x)
+    index.add(x)
+    index.nprobe = nprobe
+    return index
+
+
+def search(index: faiss.Index, query_emb: np.ndarray, k: int = 10) -> tuple[np.ndarray, np.ndarray]:
+    q = np.ascontiguousarray(query_emb, dtype=np.float32)
+    faiss.normalize_L2(q)
+    return index.search(q, k)
+```
+
+Unnormalized vectors make a user photo with an unusually large embedding norm match catalog items with large norms rather than the same product, and the recall loss shows up only as "the fine-tuned model looked better offline than in the index". The fix is free at query time, but an index built the broken way has to be rebuilt: normalizing queries alone does not fix stored vectors.

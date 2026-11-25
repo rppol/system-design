@@ -492,8 +492,10 @@ rf = RandomForestClassifier(
 
 rf.fit(X, y)
 # NOTE: with oob_score=True, oob_score_ is ACCURACY for a classifier (R^2 for a
-# regressor), not AUC. sklearn also accepts a callable metric(y_true, y_pred):
-#   RandomForestClassifier(oob_score=roc_auc_score, ...)  -> oob_score_ is now AUC
+# regressor), not AUC. A callable metric(y_true, y_pred) is accepted too, but for a
+# classifier sklearn passes y_pred = argmax(oob_decision_function_), i.e. hard LABELS,
+# so oob_score=roc_auc_score gives balanced accuracy, not ranking AUC. For OOB AUC:
+#   roc_auc_score(y, rf.oob_decision_function_[:, 1])
 print(f"OOB accuracy: {rf.oob_score_:.4f}")
 # OOB ~= N-fold (leave-one-out) CV error per ESL 15.3.1 — not "3-fold", which is
 # a common misquote — and computed for free during training
@@ -909,7 +911,7 @@ No — Random Forests are invariant to any monotonic feature transformation, so 
 No — a Random Forest regressor can never predict a value outside the min–max range of the training targets. Every prediction is an average of leaf values, and each leaf value is itself the mean of training targets that fell into it, so the ensemble output is bounded by the training target range. This makes RF unsuitable for trending time series or any problem where the target grows beyond historical values (e.g., forecasting revenue that is monotonically increasing). Gradient boosting shares this limitation; if extrapolation is required, use a linear or additive model, or detrend the target first and let RF model the residual.
 
 **Q: OOB error is often said to approximate 3-fold CV. Is that right?**
-**Short:** No. ESL 15.3.1 states an OOB error estimate is almost identical to N-fold (leave-one-out) CV, and its Exercise 15.2 asks you to show the identity becomes exact as B grows.
+**Short:** No, ESL 15.3.1 says the OOB error estimate is almost identical to N-fold (leave-one-out) CV, and the two become identical as the number of trees B grows.
 No — the primary source says N-fold, not 3-fold. Hastie, Tibshirani and Friedman, *The Elements of Statistical Learning* (2nd ed.), Section 15.3.1, page 593: "An oob error estimate is almost identical to that obtained by N-fold cross-validation (see Exercise 15.2)"; Exercise 15.2 then asks the reader to show that as the number of bootstrap samples B gets large the OOB estimate approaches the N-fold CV estimate, and that in the limit the identity is exact. The reason is structural: OOB scores each observation i using only the trees whose bootstrap sample excluded i, which is a leave-one-out prediction for i — and N-fold CV, with N the number of observations, *is* leave-one-out. The "3-fold" folklore comes from a different quantity: each individual tree misses ~36.8% of the rows, close to 3-fold's 33.3% holdout per model. That coincidence describes how much data one tree trains on; it says nothing about what the aggregated estimate is equivalent to. Where OOB genuinely departs from textbook leave-one-out CV is variance rather than target — each observation is scored by a random, overlapping subset of about B/e trees, so the estimate is noisier at small B and stabilises as B grows (a 500-tree forest is comfortably stable).
 
 **Q: What is the proximity matrix in Random Forest and what is it used for?**
@@ -1000,13 +1002,13 @@ from sklearn.metrics import roc_auc_score
 rf_base = RandomForestClassifier(
     n_estimators=500,
     max_features="sqrt",
-    oob_score=roc_auc_score,   # callable => oob_score_ is AUC, not the default accuracy
+    oob_score=True,            # OOB AUC is computed from oob_decision_function_ below
     n_jobs=-1,
     random_state=42,
     class_weight="balanced_subsample",
 )
 rf_base.fit(X_train, y_train)
-print(f"Baseline OOB AUC: {rf_base.oob_score_:.4f}")  # 0.857
+print(f"Baseline OOB AUC: {roc_auc_score(y_train, rf_base.oob_decision_function_[:, 1]):.4f}")  # 0.857
 ```
 
 **Step 2 — MDI pre-filter**
@@ -1040,14 +1042,37 @@ rf_final = RandomForestClassifier(
     n_estimators=500,
     max_features="sqrt",
     min_samples_leaf=5,    # slight regularisation with fewer features
-    oob_score=roc_auc_score,   # keep the same OOB metric as the baseline above
+    oob_score=True,            # same OOB AUC computation as the baseline above
     n_jobs=-1,
     random_state=42,
     class_weight="balanced_subsample",
 )
 rf_final.fit(X_train_reduced, y_train)
-print(f"Final OOB AUC: {rf_final.oob_score_:.4f}")   # 0.854
+print(f"Final OOB AUC: {roc_auc_score(y_train, rf_final.oob_decision_function_[:, 1]):.4f}")   # 0.854
 # Prediction time on 47 features: 1.2ms per sample (was 8.5ms with 500 features)
 ```
 
 **Outcome**: AUC loss of 0.003 (within the 0.005 budget). Prediction latency dropped from 8.5ms to 1.2ms. The regulatory team approved the 47-feature model because each feature had a clear business interpretation supported by permutation importance values — MDI alone could not have provided this justification.
+
+**BROKEN → FIX: passing `roc_auc_score` as the OOB scorer.** It looks like it turns `oob_score_` into AUC. It does not.
+
+```python
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import roc_auc_score
+
+# BROKEN: a callable oob_score receives HARD LABELS for a classifier
+rf = RandomForestClassifier(n_estimators=500, oob_score=roc_auc_score, n_jobs=-1, random_state=42)
+rf.fit(X_train, y_train)
+print(rf.oob_score_)
+# sklearn calls scoring_function(y, argmax(oob_decision_function_)): AUC of 0/1 labels,
+# which for a binary task equals balanced accuracy at a 0.5 cut-off, not ranking AUC
+```
+
+```python
+# FIX: compute OOB AUC from the out-of-bag probabilities
+rf = RandomForestClassifier(n_estimators=500, oob_score=True, n_jobs=-1, random_state=42)
+rf.fit(X_train, y_train)
+oob_auc = roc_auc_score(y_train, rf.oob_decision_function_[:, 1])
+```
+
+The broken number is still between 0.5 and 1 and moves in the right direction as the model improves, so nothing looks wrong; but it ignores how the forest ranks samples, which is the whole point of AUC, and it moves in coarse steps when features are pruned. The selection loop in Step 4 compares OOB scores to the third decimal place, so it needs the probability-based AUC. Verified against `sklearn/ensemble/_forest.py` (scikit-learn 1.9), which passes `np.argmax(self.oob_decision_function_, axis=1)` to the scoring function.

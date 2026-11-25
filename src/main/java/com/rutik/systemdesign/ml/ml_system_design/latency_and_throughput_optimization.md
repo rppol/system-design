@@ -960,6 +960,38 @@ service.
 
 **Precomputation invalidation on model updates**: item quality scores are precomputed nightly and cached. A new model version is deployed at 2pm. Requests from 2pm to 3am (until the next batch job) receive stale scores from the old model. The new model's improved accuracy is not visible in production for 13 hours. Fix: trigger a batch precomputation job as part of the model deployment pipeline; or use a flag to fall back to online inference for a fraction of traffic when the model version changes.
 
+**Cache poisoning as code: a prediction cache keyed by user only.**
+
+```python
+# BROKEN: the score is cached per user for 5 minutes, whatever the features say
+def score(user_id: str, features: list[float]) -> float:
+    key = f"pred:{user_id}"
+    if (hit := cache.get(key)) is not None:
+        return float(hit)
+    s = float(model.predict([features])[0])
+    cache.set(key, s, ex=300)
+    return s
+```
+
+```python
+# FIX: key on the model version and a digest of the exact feature vector
+import hashlib
+
+import numpy as np
+
+
+def score(user_id: str, features: list[float]) -> float:
+    digest = hashlib.sha256(np.asarray(features, dtype=np.float32).tobytes()).hexdigest()[:16]
+    key = f"pred:{MODEL_VERSION}:{user_id}:{digest}"
+    if (hit := cache.get(key)) is not None:
+        return float(hit)
+    s = float(model.predict([features])[0])
+    cache.set(key, s, ex=300)
+    return s
+```
+
+With the broken key, a risk feature that spikes mid-session has no effect for up to 5 minutes, and a model rollout keeps serving the old model's scores until the TTL expires. The hit rate looks excellent. Keying on the feature digest makes any change in inputs a miss by construction, and the model version in the key makes a rollout invalidate the cache.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1134,3 +1166,49 @@ and a 32% QPS reduction allow. CTR AUC loss: 0.003 absolute (within tolerance). 
 engineering time: 3 weeks. The lesson worth keeping: three of the four optimizations moved
 the tail, and the fourth — the one with the most impressive-looking headline number — moved
 only the mean.
+
+**BROKEN → FIX: the model-loading bug from Optimization 1.** Twelve milliseconds of every request went to loading a model that never changed.
+
+```python
+import numpy as np
+import onnxruntime as ort
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+# BROKEN: a new session per request — file read, graph optimisation and GPU upload every time
+@app.post("/rank")
+def rank(features: list[list[float]]) -> list[float]:
+    sess = ort.InferenceSession("ranker.onnx", providers=["CUDAExecutionProvider"])
+    return sess.run(None, {"x": np.asarray(features, dtype=np.float32)})[0].ravel().tolist()
+```
+
+```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import Request
+
+N_FEATURES = 256   # illustrative
+
+
+# FIX: load once at startup, warm up, reuse the session for every request
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    sess = ort.InferenceSession("ranker.onnx", providers=["CUDAExecutionProvider"])
+    sess.run(None, {"x": np.zeros((200, N_FEATURES), dtype=np.float32)})   # first run pays CUDA setup
+    app.state.sess = sess
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/rank")
+def rank(features: list[list[float]], request: Request) -> list[float]:
+    sess: ort.InferenceSession = request.app.state.sess
+    return sess.run(None, {"x": np.asarray(features, dtype=np.float32)})[0].ravel().tolist()
+```
+
+The warm-up call matters as much as the hoist: the first `run` on a CUDA session pays context creation and kernel selection, so without it the first requests after every deploy land in the tail and look like a P99 regression.

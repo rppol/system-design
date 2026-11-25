@@ -66,16 +66,16 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 - Fused elementwise ops: torch.compile() automatically fuses adjacent elementwise operations (relu + add + layer_norm) into a single CUDA kernel
 - Custom CUDA kernels: for operations not covered by PyTorch, write custom CUDA kernels (or use Triton to write them in Python)
 
-**GPU selection**:
+**GPU selection** (every Tensor Core figure is labelled dense or with 2:4 structured sparsity; NVIDIA datasheets print the sparse number by default, and it is exactly 2x the dense one):
 - GB300 NVL72 (Blackwell Ultra B300): 72 GPUs in one NVLink domain per rack; 20 TB HBM3e and 576 TB/s HBM bandwidth per rack (about 8 TB/s per GPU), 130 TB/s NVLink (1.8 TB/s per GPU), 360 PFLOP/s BF16 per rack with sparsity
 - B200 180GB SXM (Blackwell): frontier training and high-throughput inference; ~2,250 TFLOP/s BF16 dense, 8 TB/s HBM3e, 1.8 TB/s NVLink; ~$7/hr on cloud
-- H200 141GB SXM: H100 compute with far more memory and bandwidth — the practical inference GPU for large KV caches; 1,979 TFLOP/s BF16 (with sparsity), 4.8 TB/s HBM3e, 900 GB/s NVLink
-- H100 80GB SXM: the volume training GPU; 989 TFLOP/s BF16 (with sparsity), 3.35 TB/s HBM3, 900 GB/s NVLink; ~$4/hr on cloud
-- A100 80GB SXM: still ubiquitous and the cheapest way to get NVLink; 312 TFLOP/s BF16, 2 TB/s HBM2e, 600 GB/s NVLink; ~$2-3/hr on cloud
+- H200 141GB SXM: the same Hopper compute as H100 with far more memory and bandwidth — the practical inference GPU for large KV caches; 989 TFLOP/s BF16 dense (1,979 with sparsity), 4.8 TB/s HBM3e, 900 GB/s NVLink
+- H100 80GB SXM: the volume training GPU; 989 TFLOP/s BF16 dense (1,979 with sparsity), 3.35 TB/s HBM3, 900 GB/s NVLink; ~$4/hr on cloud. H100 and H200 differ in memory (80 vs 141 GB, 3.35 vs 4.8 TB/s), not in FLOP/s
+- A100 80GB SXM: still ubiquitous and the cheapest way to get NVLink; 312 TFLOP/s BF16 dense (624 with sparsity), 2 TB/s HBM2e, 600 GB/s NVLink; ~$2-3/hr on cloud
 - RTX 5090 32GB (Blackwell): GDDR7 on a 512-bit bus; the consumer card that followed the 4090 for local fine-tuning and inference
-- RTX 4090 24GB (Ada): previous consumer generation, still a cheap option for medium models (<20B with quantization); 330 TFLOP/s BF16, 1 TB/s GDDR6X; ~$2,000 purchase
-- T4 16GB: inference workloads; 65 TFLOP/s FP16; very cost-effective for batch inference (~$0.35/hr on AWS)
-- L4 24GB: efficient inference + fine-tuning; 121 TFLOP/s BF16; $0.72/hr on GCP
+- RTX 4090 24GB (Ada): previous consumer generation, still a cheap option for medium models (<20B with quantization); 165 TFLOP/s BF16 dense with FP32 accumulate (330 with sparsity; GeForce parts run FP32-accumulate Tensor math at half the FP16-accumulate rate), 1 TB/s GDDR6X; ~$2,000 purchase
+- T4 16GB: inference workloads; 65 TFLOP/s FP16 dense (Turing has no sparsity mode); very cost-effective for batch inference (~$0.35/hr on AWS)
+- L4 24GB: efficient inference + fine-tuning; 121 TFLOP/s BF16 dense (242 with sparsity); $0.72/hr on GCP
 - A10G 24GB: AWS g5 instances; good for inference + LoRA fine-tuning; ~$1-4/hr
 
 ---
@@ -778,19 +778,19 @@ to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an opti
 
 ## 8. Tradeoffs
 
-| GPU | VRAM | BF16 TFLOP/s | HBM Bandwidth | NVLink | Cloud Cost/hr | Best For |
+| GPU | VRAM | BF16 TFLOP/s dense (with 2:4 sparsity) | HBM Bandwidth | NVLink | Cloud Cost/hr | Best For |
 |---|---|---|---|---|---|---|
-| B300 (GB300 NVL72) | ~278 GB | ~5,000* | ~8 TB/s | 1.8 TB/s | varies | Rack-scale frontier training and inference |
+| B300 (GB300 NVL72) | ~278 GB | ~2,500 (~5,000) | ~8 TB/s | 1.8 TB/s | varies | Rack-scale frontier training and inference |
 | B200 180GB SXM | 180 GB | 2,250 | 8 TB/s | 1.8 TB/s | ~$7 | Frontier training, high-throughput inference |
-| H200 141GB SXM | 141 GB | 1,979* | 4.8 TB/s | 900 GB/s | varies | Large-KV-cache inference |
-| H100 80GB SXM | 80 GB | 989* | 3.35 TB/s | 900 GB/s | ~$4 | Volume training |
-| A100 80GB SXM | 80 GB | 312 | 2 TB/s | 600 GB/s | ~$2-3 | Large model training on a budget |
-| RTX 4090 24GB | 24 GB | 330* | 1 TB/s | None (PCIe) | ~$1.5 | Medium model training |
-| L4 24GB | 24 GB | 121 | 300 GB/s | None | ~$0.72 | Inference + fine-tuning |
-| T4 16GB | 16 GB | 65 | 300 GB/s | None | ~$0.35 | Batch inference |
-| A10G 24GB | 24 GB | 125 | 600 GB/s | None | ~$1-4 | Inference + LoRA |
+| H200 141GB SXM | 141 GB | 989 (1,979) | 4.8 TB/s | 900 GB/s | varies | Large-KV-cache inference |
+| H100 80GB SXM | 80 GB | 989 (1,979) | 3.35 TB/s | 900 GB/s | ~$4 | Volume training |
+| A100 80GB SXM | 80 GB | 312 (624) | 2 TB/s | 600 GB/s | ~$2-3 | Large model training on a budget |
+| RTX 4090 24GB | 24 GB | 165 (330), FP32 accumulate | 1 TB/s | None (PCIe) | ~$1.5 | Medium model training |
+| L4 24GB | 24 GB | 121 (242) | 300 GB/s | None | ~$0.72 | Inference + fine-tuning |
+| T4 16GB | 16 GB | 65 FP16 (no BF16, no sparsity) | 300 GB/s | None | ~$0.35 | Batch inference |
+| A10G 24GB | 24 GB | 125 (A10 datasheet figure) | 600 GB/s | None | ~$1-4 | Inference + LoRA |
 
-*with sparsity / structured sparsity enabled. Cloud rates are on-demand list prices and move often — re-check before quoting one.
+Compare GPUs on the dense column: NVIDIA's datasheets print the 2:4 structured-sparsity number by default, and a dense training or inference run never reaches it. The GB300 rack figure is 360 PFLOP/s BF16 with sparsity, which is ~5,000 per GPU sparse and ~2,500 dense. Cloud rates are on-demand list prices and move often — re-check before quoting one.
 
 | Memory Technique | Memory Savings | Compute Overhead | Implementation Effort |
 |---|---|---|---|
@@ -1115,9 +1115,9 @@ with torch.cuda.stream(stream_b):
 
 **What is mixed precision training and when does BF16 outperform FP16?** Mixed precision (AMP) computes forward/backward in half precision (FP16 or BF16) and accumulates gradients in FP32. FP16 has 5 exponent bits and 10 mantissa bits — it overflows for values > 65,504 (requires loss scaling). BF16 has 8 exponent bits and 7 mantissa bits — same dynamic range as FP32, no overflow, no loss scaling needed. BF16 is preferred on Ampere and newer (A100, H100/H200, B200) and for LLM training where activation magnitudes can be large. Use FP16 only on Volta/Turing (V100, T4) where BF16 hardware support is absent.
 
-**What is GPU memory bandwidth vs. compute throughput, and which limits LLM inference?** Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 4-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum per-token generation time regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity to better utilize compute.
+**What is GPU memory bandwidth vs. compute throughput, and which limits LLM inference?** Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 2-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum per-token generation time regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity to better utilize compute.
 
-**What is tensor core utilization and how do matrix dimensions affect it?** Tensor cores on NVIDIA Ampere GPUs operate on 16×16 matrix tiles (FP16/BF16). If the matrix dimensions are not multiples of 16 (and ideally 128 for best efficiency), tensor cores pad to the next multiple, wasting cycles. Practical rule: keep all matrix dimensions (batch size, sequence length, hidden dim) as multiples of 64 or 128. A hidden size of 4097 wastes ~50% of a tensor core tile; hidden size 4096 achieves near-peak utilization. Use `torch.backends.cuda.matmul.allow_tf32 = True` on Ampere to enable TF32 for FP32 matmuls — 10× faster than FP32 with minimal accuracy loss.
+**What is tensor core utilization and how do matrix dimensions affect it?** Alignment picks the kernel, it does not switch Tensor Cores on: cuBLAS uses them for FP16/BF16/TF32 at any shape, but operands whose leading dimensions are multiples of 8 elements (16 bytes at BF16) get the vectorized kernels, and anything else gets a slower ragged-edge kernel. The padding itself is cheap — a hidden size of 4097 padded to the next multiple of 16 (4112) adds 15/4097 = 0.4% extra work — so the cost of 4097 is the slow kernel choice, not wasted tile area; pad to 4104 (multiple of 8) or better to 4160 (multiple of 64) and profile achieved TFLOP/s. For FP32 matmuls on Ampere and newer, opt into TF32 with `torch.backends.cuda.matmul.fp32_precision = "tf32"` (or the global `torch.set_float32_matmul_precision("high")`); do not combine it with the older `allow_tf32` flags, because PyTorch 2.15's CUDA notes state that mixing the old and new settings is not supported. On an A100 the peak gain is 156 TFLOP/s TF32 against 19.5 TFLOP/s FP32, about 8x, and PyTorch's own 10240x10240 benchmark measures ~7x, with relative error about two orders of magnitude larger than FP32.
 
 **What is gradient checkpointing and what is the compute-memory trade-off?** During backpropagation, PyTorch stores all intermediate activations from the forward pass to compute gradients. For a 7B LLM with sequence length 4k, this can require 80GB+. Gradient checkpointing (`torch.utils.checkpoint.checkpoint_sequential`) discards activations after the forward pass and recomputes them during backward when needed. Memory reduction: O(sqrt(N)) vs. O(N) for N layers (recompute the N/2 discarded activations from the N/2 checkpointed). Compute overhead: ~30% more FLOPS (one extra partial forward pass). The trade-off: pay 30% more compute to train models 5-10× larger than VRAM allows.
 

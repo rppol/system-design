@@ -1,4 +1,6 @@
 # Design a Semantic Search Engine
+## Intuition
+
 > "A semantic search engine is like a librarian who understands that 'cardiac arrest' and 'heart attack' mean the same thing — and returns relevant books regardless of which phrase the patron used."
 
 **Key insight:** The central architectural decision in semantic search is the bi-encoder/cross-encoder split. A bi-encoder (one BERT per document, one per query, dot-product similarity) runs fast enough to score millions of documents but sacrifices accuracy. A cross-encoder (one BERT that jointly encodes query + document) is highly accurate but too slow to score a full corpus. The solution is a two-stage pipeline: bi-encoder for fast candidate retrieval, cross-encoder for precise re-ranking of the top-100.
@@ -6,6 +8,23 @@
 Mental model: Bi-encoder = phone book search (fast, exact lookup, no context). Cross-encoder = a subject matter expert who reads both the query and the document together and judges relevance holistically. Neither alone solves the problem: the phone book misses synonyms and paraphrases; the expert takes too long to read every book in the library.
 
 Why this system exists: Keyword search (BM25) breaks down when queries and documents use different vocabulary for the same concept. Medical search, legal search, enterprise knowledge bases, and e-commerce search all require matching on meaning, not just string overlap. Semantic search using BERT embeddings closes the vocabulary gap; the size of the recall gain over pure keyword search is strongly domain-dependent, so measure it on your own corpus rather than assuming a fixed uplift.
+
+The second insight, the one that causes most production incidents, is that **the index and the query encoder are one artifact, not two**. A FAISS index is a cache of `doc_encoder_v(text)` for one specific encoder version `v`. The moment the query side moves to `v+1`, every dot product compares vectors from two different spaces, and nothing raises an error — the scores still look like floats in `[-1, 1]`. §4.6 shows that failure in runnable code and the version gate that prevents it.
+
+**What this study is not.** It stops at a ranked list of documents. Extracting or generating an answer from those documents is [Design a Question Answering System](design_question_answering_system.md); learning-to-rank on engagement signals (clicks, dwell, purchases) over a candidate set is [Design a Search Ranking System](design_search_ranking.md). This file owns the retrieval layer underneath both: how candidates are found, fused, re-scored, filtered, and kept fresh.
+
+**Vocabulary used throughout:**
+
+| Term | Meaning |
+|---|---|
+| Bi-encoder | Two towers (often weight-shared) that embed query and document independently; similarity is a dot product |
+| Cross-encoder | One transformer that reads `[CLS] query [SEP] doc [SEP]` jointly and outputs one relevance score |
+| ANN | Approximate nearest neighbour search (IVF, HNSW, PQ) — trades a little recall for orders-of-magnitude speed |
+| RRF | Reciprocal Rank Fusion — merges ranked lists using `1/(k + rank)`, ignoring raw score scales |
+| Recall@100 | Share of relevant documents present in the top-100 candidates; the ceiling for every later stage |
+| NDCG@10 | Position-discounted quality of the final top-10; the user-facing metric |
+| Hard negative | A non-relevant document that a cheap retriever ranks highly; the most informative training negative |
+| Index generation | A versioned build of the vector index tied to exactly one encoder checkpoint (§4.6) |
 
 ---
 
@@ -377,6 +396,214 @@ class IncrementalIndexUpdater:
         return [(doc_ids[i], float(scores[i])) for i in top_indices]
 ```
 
+### 4.6 Encoder and Index Versioning — the silent-space-mismatch bug
+
+An index is `doc_encoder_v(text)` frozen at build time. A query encoder at any other version produces vectors in a different coordinate system, and dot products across two systems are noise. The code below makes that concrete with a toy encoder (a fixed random rotation of a latent "meaning" vector), so the failure can be reproduced with nothing but numpy.
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+DIM = 64
+rng = np.random.default_rng(7)
+
+
+def make_encoder(seed: int) -> np.ndarray:
+    """Toy encoder: a fixed random orthogonal projection. Two seeds = two embedding spaces."""
+    q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(DIM, DIM)))
+    return q
+
+
+def encode(meanings: np.ndarray, enc: np.ndarray) -> np.ndarray:
+    x = meanings @ enc
+    return x / np.linalg.norm(x, axis=1, keepdims=True)
+
+
+def recall_at_k(index_vecs: np.ndarray, query_vecs: np.ndarray, gold: np.ndarray, k: int = 10) -> float:
+    topk = np.argsort(-(query_vecs @ index_vecs.T), axis=1)[:, :k]
+    return float(np.mean([g in row for g, row in zip(gold, topk)]))
+
+
+# 10,000 documents; 500 queries, each a noisy paraphrase of one known document.
+doc_meaning = rng.normal(size=(10_000, DIM))
+gold = rng.integers(0, 10_000, size=500)
+query_meaning = doc_meaning[gold] + 0.3 * rng.normal(size=(500, DIM))
+
+enc_v1, enc_v2 = make_encoder(1), make_encoder(2)
+index_v1 = encode(doc_meaning, enc_v1)
+
+# BROKEN: the v2 query encoder is deployed; the index still holds v1 document vectors.
+print("v1 query vs v1 index:", recall_at_k(index_v1, encode(query_meaning, enc_v1), gold))
+print("v2 query vs v1 index:", recall_at_k(index_v1, encode(query_meaning, enc_v2), gold))
+```
+
+The first line prints a recall at or near 1.00: a paraphrase with 0.3 noise per dimension keeps a cosine of about 0.96 to its source document, while the best of 10,000 random documents sits near 0.5. The second line prints a value near the random baseline of `k / N = 10 / 10,000 = 0.001`. No exception, no NaN, no latency change — only a quality collapse that a latency dashboard cannot see. That is the shape of Pitfall 4 in §9.
+
+The fix is to make "which encoder built this index" part of the index's identity, and to move query encoder and index together in one atomic step:
+
+```python
+class VersionMismatch(RuntimeError):
+    """Raised when a query would be scored against an index built by another encoder."""
+
+
+@dataclass(frozen=True)
+class IndexGeneration:
+    encoder_version: str
+    vectors: np.ndarray
+
+
+@dataclass
+class SearchService:
+    encoders: dict[str, np.ndarray]
+    live: IndexGeneration
+    query_encoder_version: str
+
+    def search(self, query_meaning: np.ndarray, k: int = 10) -> np.ndarray:
+        # FIX: refuse to score across spaces. A 500 is visible; a silent 0.001 recall is not.
+        if self.query_encoder_version != self.live.encoder_version:
+            raise VersionMismatch(
+                f"query encoder {self.query_encoder_version} != index {self.live.encoder_version}"
+            )
+        q = encode(query_meaning, self.encoders[self.query_encoder_version])
+        return np.argsort(-(q @ self.live.vectors.T), axis=1)[:, :k]
+
+    def cut_over(self, new_generation: IndexGeneration) -> None:
+        """Index and query encoder change in one assignment, never one without the other."""
+        self.live, self.query_encoder_version = new_generation, new_generation.encoder_version
+
+
+svc = SearchService(
+    encoders={"v1": enc_v1, "v2": enc_v2},
+    live=IndexGeneration("v1", index_v1),
+    query_encoder_version="v1",
+)
+index_v2 = IndexGeneration("v2", encode(doc_meaning, enc_v2))  # built offline, hours earlier
+svc.cut_over(index_v2)
+hits = svc.search(query_meaning)
+print("after atomic cut-over:", float(np.mean([g in row for g, row in zip(gold, hits)])))
+
+svc.query_encoder_version = "v1"  # someone rolls back only the query side
+try:
+    svc.search(query_meaning)
+except VersionMismatch as err:
+    print("blocked:", err)
+```
+
+In production the same idea lives in three places: the index manifest stores the encoder checkpoint digest; the query service loads the encoder named by the manifest rather than by its own config; and the rollout tool deploys "index generation N" as a unit, so a rollback is one pointer change. Re-embedding 10M documents takes ~5.6 GPU-hours on one A100 (§2), so the new generation is always built offline next to the live one; there is no in-place upgrade path.
+
+### 4.7 Filtered Retrieval — pre-filter vs post-filter
+
+Most real queries carry a structured filter: tenant id, language, "in stock", "published after". ANN indexes do not know about filters, so there are two places to apply one. **Post-filtering** asks the index for `fetch` candidates and drops the ones that fail the filter. **Pre-filtering** restricts the search to allowed ids before scoring. Post-filtering is the default in many hand-rolled systems, and it breaks quietly when the filter is selective.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(11)
+N_DOCS, K = 10_000, 10
+scores = rng.normal(size=N_DOCS)                     # similarity of every doc to one query
+tenant_mask = np.zeros(N_DOCS, dtype=bool)
+tenant_mask[rng.choice(N_DOCS, size=50, replace=False)] = True  # small tenant: 0.5% of the corpus
+
+
+def post_filter_search(scores: np.ndarray, allowed: np.ndarray, k: int, fetch: int) -> list[int]:
+    candidates = np.argsort(-scores)[:fetch]
+    return [int(i) for i in candidates if allowed[i]][:k]
+
+
+# BROKEN: fetch 100 then filter. Expected survivors = 100 x 0.005 = 0.5 documents.
+print("post-filter:", len(post_filter_search(scores, tenant_mask, K, fetch=100)), "results")
+
+
+def filtered_search(scores: np.ndarray, allowed: np.ndarray, k: int, brute_force_below: float = 0.02) -> list[int]:
+    """FIX: choose the strategy from the filter's selectivity."""
+    selectivity = float(allowed.mean())
+    if selectivity == 0.0:
+        return []
+    if selectivity < brute_force_below:
+        ids = np.flatnonzero(allowed)                # exact search over the small subset
+        return ids[np.argsort(-scores[ids])[:k]].tolist()
+    fetch = int(np.ceil(k / selectivity * 2))        # over-fetch with a 2x safety factor
+    return post_filter_search(scores, allowed, k, fetch)
+
+
+print("selectivity-aware:", len(filtered_search(scores, tenant_mask, K)), "results")
+```
+
+The broken version usually returns 0 or 1 result for this tenant instead of 10, and the tenant sees an "empty search" that no other tenant can reproduce. The fix costs 50 dot products for the small tenant (microseconds) and an over-fetch of `ceil(10 / 0.5 x 2) = 40` candidates for a tenant owning half the corpus. In FAISS the pre-filter path is `faiss.SearchParametersIVF(sel=faiss.IDSelectorBatch(ids), nprobe=64)` passed to `index.search`; managed vector stores (Qdrant, Weaviate, Vespa, OpenSearch) expose the same choice as a filtered-HNSW or a filter-first query plan. For hard multi-tenancy (one tenant must never see another's rows), give each large tenant its own index partition rather than trusting a filter predicate.
+
+### 4.8 Offline Evaluation Harness and Stage Attribution
+
+A single NDCG@10 number says the system got worse but not *which stage* got worse. The harness below scores every query twice and attributes each miss to retrieval (the relevant document never reached the re-ranker) or ranking (it reached the re-ranker and was placed outside the top-10). That split is what tells you whether to spend the next sprint on the bi-encoder or on the cross-encoder.
+
+```python
+from collections import Counter
+from dataclasses import dataclass
+
+import numpy as np
+
+
+def ndcg_at_k(ranked: list[str], relevance: dict[str, int], k: int = 10) -> float:
+    dcg = sum((2 ** relevance.get(d, 0) - 1) / np.log2(i + 2) for i, d in enumerate(ranked[:k]))
+    ideal = sorted(relevance.values(), reverse=True)[:k]
+    idcg = sum((2 ** g - 1) / np.log2(i + 2) for i, g in enumerate(ideal))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+def recall_at_k(ranked: list[str], relevance: dict[str, int], k: int) -> float:
+    relevant = {d for d, g in relevance.items() if g > 0}
+    return len(relevant & set(ranked[:k])) / len(relevant) if relevant else 0.0
+
+
+@dataclass
+class QueryResult:
+    query_id: str
+    segment: str                 # "navigational", "long-tail", "acronym", ...
+    candidates: list[str]        # fused top-100 handed to the cross-encoder
+    final: list[str]             # cross-encoder top-10
+    relevance: dict[str, int]    # graded human labels 0-3
+
+
+def attribute_misses(results: list[QueryResult]) -> dict[str, Counter]:
+    by_segment: dict[str, Counter] = {}
+    for r in results:
+        bucket = by_segment.setdefault(r.segment, Counter())
+        for doc, grade in r.relevance.items():
+            if grade < 2:
+                continue
+            if doc not in r.candidates:
+                bucket["retrieval_miss"] += 1
+            elif doc not in r.final:
+                bucket["ranking_miss"] += 1
+            else:
+                bucket["hit"] += 1
+    return by_segment
+
+
+demo = [
+    QueryResult("q1", "acronym", ["d9", "d4"], ["d9", "d4"], {"d1": 3, "d9": 1}),
+    QueryResult("q2", "long-tail", ["d2", "d7", "d5"], ["d7", "d2"], {"d5": 3, "d7": 2}),
+]
+print(attribute_misses(demo))
+print(round(ndcg_at_k(demo[1].final, demo[1].relevance), 3), recall_at_k(demo[1].candidates, demo[1].relevance, 100))
+```
+
+In the demo, `q1`'s grade-3 document `d1` never entered the candidate set — a retrieval miss that no re-ranker can fix, typical of acronym queries where the bi-encoder has no anchor. `q2`'s `d5` was in the candidates and was ranked out of the final list — a ranking miss. Run the harness per segment on the 500-query golden set from §8 and the remedy is usually obvious: retrieval misses concentrated on acronyms and product codes point at the BM25 weight in RRF or at vocabulary (§11 OOV question); ranking misses concentrated on long queries point at the cross-encoder's 512-token truncation.
+
+**Turning re-ranker scores into an abstention threshold.** A cross-encoder logit is not a probability, and its scale shifts with every fine-tune. If the product needs "show nothing rather than something wrong" (a support portal that falls back to a human), fit Platt scaling or isotonic regression on a labelled slice and threshold the calibrated probability, then re-fit after each model update. The method and its failure modes are in [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md); the only search-specific rule is to calibrate on the *re-ranked* top-10, because the score distribution at depth 100 is a different population.
+
+### 4.9 Training Data from Click Logs Without Leakage
+
+Click logs are the cheapest positive labels (§11 Q4), and they carry two traps that a feature-store team will recognise:
+
+| Trap | What goes wrong | Mitigation |
+|---|---|---|
+| Point-in-time leakage | A training pair uses the document's *current* text, but the user clicked an older version; or the pair includes documents published after the query | Join each `(query, clicked_doc)` to the document snapshot valid at the click timestamp, exactly as a feature store does a point-in-time join — see [Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) |
+| Position bias | Rank-1 results get clicked because they are rank 1; the model learns the old ranker | Drop clicks with dwell under ~10 s, weight clicks by inverse propensity of their position, or randomise the top-3 on 1% of traffic to estimate the propensity |
+| Popularity feedback loop | Docs that are shown get clicked, get more training weight, get shown more | Cap positives per document per epoch (e.g. 50) and add synthetic queries for unclicked documents, as Spotify did (§6) |
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -418,6 +645,21 @@ MiniLM-L6 is the right choice: it matches L12 on both metrics at nearly 2× the 
 
 Learned fusion (train a model to weight dense and sparse scores) is more accurate but requires labeled training data for the fusion model and adds model versioning complexity. RRF is a simple closed-form combination that requires no additional training and, in most reported hybrid-search comparisons, lands within a couple of NDCG@10 points of a learned combiner. Use RRF as the default; consider learned fusion only once you have on the order of 5,000+ human-labeled query-result pairs (below that the fusion model overfits) — and validate the gain on your own held-out set rather than assuming it.
 
+**Decision 6: Flat float32 vs product quantization (PQ) for the vector store**
+
+| Encoding (10M docs, d=128) | Bytes per vector | Index RAM | Typical use |
+|---|---|---|---|
+| IVF-Flat, float32 | 512 | 5.12 GB | This design: fits on two r5.large, exact distances inside probed cells |
+| IVF-SQ8 (8-bit scalar) | 128 | 1.28 GB | 4x smaller; small recall loss; easy first step |
+| IVF-PQ, m=16 sub-quantizers x 8 bits | 16 | 0.16 GB | 32x smaller; noticeable recall loss, usually recovered by re-scoring the top-200 with exact vectors |
+| IVF-PQ at 100M docs, d=768 | 32 (m=32) | 3.2 GB vs 307 GB flat | The only way 100M x 768 fits in one machine's RAM |
+
+The arithmetic column is exact (`N x bytes`, ids and centroids excluded). The rule: stay flat while the index fits in RAM on two replicas with 2x headroom; switch to SQ8, then PQ with an exact re-score, when it does not. At 10M x 128 dims the flat index is cheap enough that PQ's recall loss buys nothing.
+
+**Decision 7: Pre-filter vs post-filter for metadata constraints**
+
+Post-filtering keeps the ANN index simple and is fine when filters keep at least ~10% of the corpus. Below that, the expected survivors of a `fetch`-sized candidate list drop to `fetch x selectivity`, which is how a 0.5%-selective tenant filter turns 100 candidates into 0.5 results (§4.7). This design uses the selectivity-aware policy in §4.7: exact search over the allowed subset below 2% selectivity, 2x over-fetch above it, and a dedicated index partition for any tenant above 1M documents.
+
 ---
 
 ## 6. Real-World Implementations
@@ -431,6 +673,20 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 **REALM (Google Research, 2020):** REALM is the reference design for jointly pre-training a retriever with the language model, so the retriever is updated by the LM's own training signal instead of a fixed relevance label. Its knowledge corpus was Wikipedia (roughly 13M passages), not web-scale — it is a research architecture, not Google's production web ranking stack. The operationally important lesson generalizes regardless of scale: because the document index must be re-encoded whenever the encoder changes, REALM re-built its index asynchronously during training. In a production system the equivalent is content-fingerprinted incremental re-encoding of changed documents.
 
 **Vespa (E-commerce Semantic Search):** Vespa (originating at Yahoo and used by Spotify, among others) natively combines dense and sparse retrieval in a single query plan rather than merging two systems at the application layer. A common production pattern in e-commerce on top of that: apply a per-category diversity constraint at the retrieval stage — retrieve top-N per product category, then merge — so that an ambiguous query ("Apple") returns both electronics and produce rather than 50 near-duplicate phones.
+
+**Spotify (Natural Language Search for podcast episodes, 2022):** Spotify's engineering blog ("Introducing Natural Language Search for Podcast Episodes", March 2022) is the closest public match to this design. Their Elasticsearch term matching returned nothing for a query like "electric cars climate impact", so they added dense retrieval as an *additional* source rather than a replacement. The base model is the multilingual Universal Sentence Encoder CMLM, fine-tuned as a weight-shared (siamese) bi-encoder with cosine similarity and in-batch negatives, later improved with in-batch hard-negative mining and a margin loss. Training pairs came from four sources: successful past searches, query reformulations that succeeded after a failed first query, synthetic queries generated by a BART model fine-tuned on MS MARCO, and a small hand-written set used only for evaluation; evaluation episodes were kept out of training. Episode vectors are indexed in Vespa for ANN retrieval of the top 30 semantic candidates; the query encoder runs on Vertex AI GPUs because their load test measured a 6x cost reduction for T4 GPU over CPU, with a vector cache for repeated queries. A final-stage re-ranker merges candidates from all sources and takes the query-episode cosine as one of its features. The launch A/B test reported a significant increase in podcast engagement. The lesson that transfers: "there is no silver bullet in retrieval" — dense retrieval loses on exact-term queries, so it is one source among several.
+
+**Meta (Embedding-based Retrieval in Facebook Search, KDD 2020):** Huang et al. describe adding embedding-based retrieval to a search system that was "still mainly based on a Boolean matching model". The paper's contributions map onto this file: a unified embedding model that includes the searcher's context (social graph) alongside query text, serving the embeddings inside an existing inverted-index retrieval system rather than a separate vector database, ANN parameter tuning, and full-stack optimization across retrieval and ranking. The paper reports significant metric gains in online A/B experiments across Facebook Search verticals. The transferable point is architectural: at large scale, dense retrieval is added as one more candidate generator inside the existing retrieval stack — the same hybrid shape as §3.
+
+**Sources, condensed:**
+
+| Company / system | What this file borrows | Primary source |
+|---|---|---|
+| Elasticsearch | Shard-level HNSW, RRF as a fusion option | Elastic documentation and blog |
+| OpenSearch Neural Search | Hybrid pipeline, PQ for large vector fields | OpenSearch documentation |
+| Spotify | Dense retrieval as an extra source, synthetic queries, GPU query encoding, Vespa ANN | Spotify Engineering, March 2022 |
+| Meta (Facebook Search) | EBR inside an inverted-index stack, context-aware embeddings | Huang et al., KDD 2020 (arXiv 2006.11632) |
+| Google REALM | Asynchronous index refresh when the encoder changes | Guu et al., 2020 |
 
 ---
 
@@ -465,6 +721,36 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 2. **Cross-encoder latency exceeds 200ms p99:** Symptom: total query latency alarm. Diagnosis: cross-encoder CPU saturation (concurrent queries exceed core capacity). Mitigation: temporarily reduce re-ranking depth from 100 to 30 candidates (accept 3pp NDCG@10 loss). Resolution: add cross-encoder instances or switch to batch processing with priority queue.
 3. **Index staleness (new documents not appearing):** Symptom: recently published documents not returned in searches. Diagnosis: delta index updater Flink job lagging behind new document writes. Mitigation: fall back to BM25-only for new documents (ES indexes documents immediately). Resolution: scale Flink job or increase batch size for embedding updates.
 4. **Model update degrades domain-specific queries:** Symptom: NDCG@10 on golden set drops on a specific query cluster. Diagnosis: fine-tuning overfitted to one subdomain. Resolution: roll back model version; retrain with stratified domain sampling.
+5. **Single tenant reports "search returns nothing":** Symptom: zero-result rate is normal globally but 60%+ for one tenant. Diagnosis: post-filter on a selective tenant filter (§4.7). Mitigation: route that tenant to exact search over its subset. Resolution: deploy the selectivity-aware policy for every tenant and add a per-tenant zero-result alert.
+
+### Encoder Upgrade Procedure (the most dangerous routine change)
+
+An encoder upgrade touches both the index and the query path, so it ships as an index generation (§4.6), never as a model hot-swap:
+
+```mermaid
+sequenceDiagram
+    participant Train as Training job
+    participant Build as Index builder
+    participant Shadow as Shadow scorer
+    participant Router as Query router
+    Train->>Build: encoder v2 checkpoint + digest
+    Build->>Build: re-embed 10M docs, about 5.6 A100-hours
+    Build->>Shadow: index generation v2 (manifest names encoder v2)
+    Router->>Shadow: mirror 5% of live queries
+    Shadow-->>Router: NDCG@10 and Recall@100 on golden set, overlap@10 vs v1
+    Router->>Router: atomic switch to generation v2 at 1%, 10%, 50%, 100%
+    Router->>Router: keep generation v1 warm for 72 hours as the rollback target
+```
+
+*Each step gates the next: the shadow stage must show no NDCG@10 drop over 0.02 on the golden set, and the online ramp is an A/B test on click-through and reformulation rate with the guardrails described in [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md).*
+
+Keeping generation v1 warm doubles index RAM for 72 hours (5.12 GB to 10.24 GB in this design), which is the price of a one-pointer rollback.
+
+### Drift and Fairness Monitoring
+
+- **Query drift:** track the weekly share of queries whose top-1 cross-encoder score falls below the calibrated abstention threshold. New product names, a new regulation, or a new customer segment show up here weeks before NDCG on the static golden set moves. The PSI-style alerting and retraining triggers are in [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md); refresh 100 golden queries per month from the low-score bucket so the golden set drifts with the traffic.
+- **Corpus drift:** the IVF centroids were trained on last week's corpus. If the delta index (§4.5) grows a cluster the centroids do not cover, nprobe=64 silently searches the wrong cells; rebuild centroids when more than 10% of new documents land in the 5% most-populated cells.
+- **Exposure fairness:** in a marketplace or job search, the retriever decides which sellers or candidates are ever seen. Measure the share of top-10 impressions by provider group against their share of relevant documents, and treat a large gap as a defect; the metrics and mitigation options are in [Responsible AI: Fairness and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md).
 
 ---
 
@@ -479,6 +765,20 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 **Pitfall 4: Embedding drift after model update breaking cached document index.** A team fine-tuned their bi-encoder on new training data and deployed the updated query encoder without rebuilding the document index. Because the fine-tuned model produces embeddings in a different vector space than the original model, the dot product between the new query embedding and the old document embeddings was meaningless. Recall@100 dropped from 0.91 to 0.43 overnight. Fix: always rebuild the full document index when the encoder model is updated. Use model versioning to gate this: document index version must match query encoder version.
 
 **Pitfall 5: Cross-encoder trained on different domain than production queries.** A company fine-tuned their cross-encoder on MS MARCO (a web question-answering dataset). Their production use case was enterprise software documentation search. MS MARCO queries are short factual questions; enterprise queries are long multi-concept technical queries. The cross-encoder assigned high relevance scores to short documents that contained the exact query terms (MS MARCO-style), downranking long technical documents that were actually the most relevant. Fix: create domain-specific relevance labels for 2,000 query-document pairs and fine-tune the cross-encoder on this data. NDCG@10 improved 14pp.
+
+**Pitfall 6: Post-filtering a selective tenant filter.** A B2B documentation-search product served 400 tenants from one IVF index and applied the tenant filter after fetching 100 candidates. Large tenants were fine; the 120 smallest tenants (each under 0.5% of the corpus) averaged fewer than one result per query. Support tickets blamed "the AI search", and three of those tenants churned in one quarter. Impact (illustrative): at $24k ARR each, $72k of annual revenue lost to a one-line ordering bug. Fix: the selectivity-aware policy in §4.7 plus a per-tenant zero-result alert; the small tenants' zero-result rate fell from over 60% to under 3%.
+
+**Pitfall 7: Re-embedding only changed documents after an encoder upgrade.** A team that had learned Pitfall 4 rebuilt the index on encoder upgrade, but their incremental pipeline (§4.5) kept re-encoding only documents whose content hash changed. After the upgrade, 9.6M unchanged documents were correctly re-embedded by the full rebuild; then a backfill job restored a snapshot of the delta index taken before the upgrade, mixing 180k v1 vectors into the v2 index. Those documents became unfindable by semantic search, and nobody noticed for 11 days because overall Recall@100 dropped only 1.8pp. Impact (illustrative): 180k documents (1.8% of the corpus) invisible for 11 days. Fix: store the encoder version on every vector, not only on the index manifest, and reject any write whose version differs from the generation it is written into.
+
+**Impact summary:**
+
+| Pitfall | Metric hit | Magnitude | Detection lag | Guard that would have caught it |
+|---|---|---|---|---|
+| 1 Generic SBERT on clinical notes | Recall@10 | 0.52 vs 0.61 BM25 | Before launch, if a domain golden set exists | Domain golden set in CI |
+| 2 nprobe=8 | Recall@100 | 0.71 vs 0.91 | Weeks | Retrieval-stage recall gate (§8) |
+| 4 Encoder/index mismatch | Recall@100 | 0.91 to 0.43 overnight | 1 day | Version check in `search()` (§4.6) |
+| 6 Post-filtering | Zero-result rate, small tenants | over 60% | One quarter | Per-tenant zero-result alert |
+| 7 Mixed-version vectors | Recall@100 | -1.8pp, 180k docs invisible | 11 days | Per-vector version stamp |
 
 ---
 
@@ -521,30 +821,91 @@ FAISS retrieval:
 
 CPU re-ranking stops being economic well before 20k qps. The fix is to change the work, not to buy 625 instances: cut re-rank depth from 100 to 25 candidates (4× less work), cache re-ranked results for head queries, and move the re-ranker to batched GPU inference. Any of the three moves the cross-encoder bill by roughly an order of magnitude; sizing the GPU fleet requires benchmarking on the target accelerator, so do not carry the CPU figure over.
 
+**Memory plan per index generation (d=128, float32, ids as int64):**
+
+```
+Vectors:      10M x 128 x 4 B      = 5.12 GB
+Doc ids:      10M x 8 B            = 0.08 GB
+IVF centroids: 1,024 x 128 x 4 B   = 0.5 MB (negligible)
+One generation                     = ~5.2 GB
+Live + warm rollback generation    = ~10.4 GB  (72 h after every encoder upgrade, §8)
+Delta index cap 100k x 512 B       = 0.05 GB
+Per replica with 1.5x headroom     = ~15.7 GB  -> r5.large (16 GiB) is tight; use r5.xlarge (32 GiB) during upgrades
+```
+
+**Head-query cache.** Search traffic is head-heavy, so caching the final re-ranked list for the most frequent normalised queries removes cross-encoder work in proportion to the cache hit rate. If 30% of traffic hits the cache (measure your own log; the number varies widely by product), the 20k qps cross-encoder estimate above falls from 5,000 cores to 3,500. Key the cache on `(normalised query, filter set, index generation)` so an encoder cut-over invalidates it automatically — a cache keyed only on query text serves v1 results for up to its TTL after a v2 cut-over.
+
+**Re-embedding budget.** A full rebuild is ~5.6 A100-hours for 10M docs (§2). At an illustrative $3/GPU-hour that is under $20 per generation, so the cost of re-embedding is never the reason to skip it; the binding constraint is the wall-clock time to build, shadow, and ramp (about 2 days end to end in §8's procedure).
+
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: What is the difference between a bi-encoder and a cross-encoder, and when do you use each?**
+**Short:** A bi-encoder embeds query and document separately for fast ANN retrieval; a cross-encoder reads both jointly for accurate scoring, so it only re-ranks the top-100.
+
 A bi-encoder independently encodes the query and document into separate embeddings, then computes similarity via dot product or cosine. Encoding is fast (once per document, cacheable), and retrieval via ANN is sub-millisecond at scale — but accuracy is limited because the model cannot see both query and document jointly (no cross-attention between them). A cross-encoder feeds [query, document] jointly through BERT's cross-attention layers, producing a single relevance score — much more accurate but requires a forward pass per (query, doc) pair, which is O(N) in corpus size. The production pattern is always bi-encoder for retrieval (top-100), cross-encoder for re-ranking (top-10 from those 100). Never use a cross-encoder alone — it cannot scale; and a bi-encoder alone leaves measurable NDCG@10 on the table, which is why every published hybrid stack adds a re-ranking stage (quantify the gap on your own corpus — it is strongly domain-dependent).
 
+**Q: You fine-tuned the bi-encoder, deployed it, and Recall@100 fell from 0.91 to 0.43 overnight with no errors in the logs. What happened?**
+**Short:** The new query encoder was scored against document vectors from the old encoder, so dot products compared two unrelated embedding spaces.
+
+The index is a cache of `doc_encoder_v(text)`, and a query encoder at version `v+1` places queries in a different coordinate system. Every score is still a float in `[-1, 1]`, latency is unchanged, and nothing throws, which is why this ships. The toy reproduction in §4.6 shows recall dropping to the random baseline of `k / N`. Prevent it structurally: store the encoder digest in the index manifest, make the query service load the encoder the manifest names, raise on any mismatch, and deploy "index generation N" as one unit so rollback is a pointer swap.
+
+**Q: One tenant reports that search returns nothing, while global zero-result rate and NDCG look normal. What do you check first?**
+**Short:** Check for post-filtering: a filter that keeps 0.5% of the corpus leaves about 0.5 of 100 fetched candidates, so small tenants get empty pages.
+
+ANN indexes do not apply metadata filters, so a system that fetches `fetch` candidates and filters afterwards returns `fetch x selectivity` results on average. Large tenants never notice; tenants owning under 1% of documents see almost nothing. Global metrics hide it because the small tenants are a small share of traffic. Fix it with a selectivity-aware plan (exact search over the subset when selectivity is under ~2%, over-fetch `k / selectivity x 2` otherwise, §4.7) and alert on zero-result rate per tenant, not globally.
 **Q: How do you handle queries for which neither keyword nor semantic search returns good results?**
+**Short:** Expand the query into paraphrases fused with RRF, search structured entity fields, and log low-result queries as labelling targets; never return an empty page silently.
+
 Three fallback strategies: (1) query expansion — use an LLM or T5 model to generate 3–5 paraphrases of the original query, then merge the retrieval results across all paraphrases via RRF; (2) entity-aware search — run NER on the query, then perform entity-specific searches using structured fields (e.g., match on entity type + name in document metadata, not just text); (3) hybrid fallback logging — log zero/low-result queries and use them as priority targets for active learning data collection. Never silently return empty results; always have a fallback (e.g., BM25-only if semantic retrieval fails).
 
 **Q: How do you evaluate a semantic search system offline?**
+**Short:** Measure Recall@100 at the retrieval stage and NDCG@10 after re-ranking, separately and per query segment, on a domain-labelled golden set.
+
 Use the BEIR (Benchmarking IR) evaluation framework with your domain-specific test set. Primary metrics: NDCG@10 (quality-weighted ranking at position 10) and Recall@100 (coverage of relevant documents in the retrieval stage). Two critical evaluation principles: (1) use the retrieval stage metrics (Recall@100) and end-to-end metrics (NDCG@10 after re-ranking) separately — a retrieval stage bottleneck (low Recall@100) cannot be fixed by a better re-ranker; (2) evaluate on query types separately — factual queries, definition queries, and multi-step queries have different retrieval characteristics.
 
 **Q: How do you fine-tune SBERT for a domain where you have no labeled query-document pairs?**
+**Short:** Generate synthetic queries per document with an LLM, mine click logs as implicit positives, or distil relevance scores from a stronger cross-encoder.
+
 Three options: (1) generate synthetic training data using an LLM — for each document, prompt GPT to generate 5 likely queries that this document would answer; use the (generated query, document) pairs for fine-tuning; (2) leverage click-through data — if you have a search log, (query, clicked document) pairs are implicit positive labels; (3) use knowledge distillation from a cross-encoder — fine-tune a stronger (but slow) cross-encoder first on generic MS MARCO data, then use it to generate training labels for bi-encoder fine-tuning (cross-encoder assigns relevance scores; bi-encoder learns to replicate these scores). Option 3 is the most effective when you have an existing document corpus.
 
 **Q: How do you handle out-of-vocabulary (OOV) terms with BERT-based search?**
+**Short:** WordPiece splits rare terms into subwords, which can lose meaning; add domain tokens, use a domain-pretrained encoder, and fall back to BM25 for exact strings.
+
 BERT uses WordPiece tokenization — rare words are split into subword units that are in the vocabulary (e.g., "Omicron" → ["Om", "##ic", "##ron"]). This handles most OOV terms, but brand names, acronyms, and highly specialized terminology may tokenize into semantically meaningless subwords, producing poor embeddings. Solutions: (1) continual vocabulary expansion — add domain-specific tokens to the BERT vocabulary and fine-tune embeddings; (2) hybrid fallback — for queries where the SBERT retrieval score is below a threshold (suggesting OOV or domain mismatch), fall back to BM25 which handles exact string matches even for OOV terms; (3) use BioMedBERT or LegalBERT for domain-specific tokenization where the vocabulary is pre-adapted.
 
 **Q: What is Matryoshka Representation Learning and when should you use it for semantic search?**
+**Short:** MRL trains embeddings whose leading dimensions are a usable embedding on their own, so you can retrieve with 128 dims and re-score with the full vector.
+
 Matryoshka Representation Learning (MRL) trains SBERT to produce embeddings where the first d dimensions are themselves a valid embedding (just lower quality). This allows you to use 128-dim embeddings for initial coarse retrieval (fast, low memory) and then re-score top-K using the full 768-dim embedding for the final ranking. MRL eliminates the need to choose a fixed embedding dimension at training time. Use MRL when: serving cost is a constraint (use 128-dim for ANN retrieval, saving 6× RAM vs 768-dim); when you want to support multiple quality tiers for different latency SLOs; or when you want to experimentally determine the minimum dimension that maintains acceptable recall for your specific corpus without retraining.
 
 **Q: How do you keep a semantic search index fresh when new documents arrive continuously?**
+**Short:** Append new vectors to a small flat delta index searched alongside the main IVF index, merge hourly, and rebuild the main index weekly.
+
 Three patterns: (1) incremental FAISS flat index — append new embeddings to a small flat index alongside the main IVF index; query both and merge results; rebuild the main index weekly when the flat delta grows large; (2) HNSW with real-time inserts — HNSW supports `add()` without full rebuild, at the cost of slightly degraded recall as the graph becomes less balanced; (3) streaming index update — use a document encoding pipeline (Kafka → encoder service → Vespa/Qdrant vector store) where new documents flow through encoding and are indexed within a configurable latency SLA. For 60-minute freshness on a 10M document index, the incremental flat index approach with hourly merges is the simplest operationally.
 
 **Q: How does reciprocal rank fusion compare to a trained fusion model?**
+**Short:** RRF needs no training and ignores score scales; a trained fusion model wins only by a small margin once you have about 5,000 or more labelled pairs.
+
 RRF is a parameter-free algorithm that requires no training data. Its score is 1/(rank + k) for each result list, summed across lists. It is robust to scale differences between BM25 and cosine similarity scores because it operates on ranks, not raw scores. Trained fusion fits a logistic regression or shallow network on the BM25 score, cosine score, and other signals to predict relevance. Trained fusion typically outperforms RRF by a small margin once you have on the order of 5,000+ labeled query-result pairs; below that threshold the trained model overfits and RRF wins. For most enterprise deployments with limited labeled data, RRF is the better default.
+
+**Q: Your NDCG@10 dropped 3 points after a release. How do you decide whether to fix retrieval or re-ranking?**
+**Short:** Attribute each missed relevant document to retrieval (never reached the re-ranker) or ranking (reached it but placed outside the top-10), per query segment.
+
+A single end-to-end metric cannot point at a stage. For every golden query, check whether each grade-2+ document is in the fused top-100 and whether it is in the final top-10 (§4.8). Retrieval misses cap the system no matter how good the cross-encoder is; they usually cluster on acronyms, product codes and rare entities, and the fix is the BM25 weight in RRF, domain tokens, or hard-negative fine-tuning of the bi-encoder. Ranking misses cluster on long, multi-concept queries, where the cross-encoder's 512-token truncation or MS MARCO-style bias is the cause. Report the split per segment in every model review so the next sprint targets the right stage.
+
+**Q: When should you move the vector index from flat float32 to product quantization?**
+**Short:** Move when the index no longer fits in RAM on two replicas with 2x headroom; first try SQ8, then PQ with exact re-scoring of the top few hundred.
+
+Index RAM is `N x d x 4` bytes for float32: 5.12 GB for 10M x 128, but 307 GB for 100M x 768. SQ8 cuts that 4x with a small recall loss. IVF-PQ with 32 one-byte codes cuts 100M x 768 to 3.2 GB, a 96x reduction, but approximate distances reorder near-ties, so keep the full vectors on disk or in a cheaper tier and re-score the top-200 exactly. Do not quantize an index that already fits: at 10M x 128 the flat index costs two small instances, and PQ would trade recall for savings that do not matter.
+
+**Q: How do you build bi-encoder training pairs from click logs without leakage or position bias?**
+**Short:** Join each click to the document snapshot valid at click time, drop short-dwell clicks, and correct for position with propensity weights or small randomised slots.
+
+Click logs mix three biases. Point-in-time leakage: joining a 2024 query to the 2026 text of a document teaches the model content the user never saw; do a point-in-time join exactly like a feature store. Position bias: rank-1 results are clicked because of their position, so the model relearns the old ranker; weight clicks by inverse position propensity, estimated from randomising the top-3 on about 1% of traffic. Popularity loops: shown documents get clicked and get more weight; cap positives per document per epoch and add synthetic queries for documents that are never shown. Spotify added query reformulations after failed searches as a fourth source, because they are naturally "semantic" pairs with low word overlap.
+
+**Q: How do you roll out a new encoder without an outage or a quality regression?**
+**Short:** Build a complete new index generation offline, shadow-score it on mirrored traffic, ramp it as an A/B test, and keep the old generation warm for rollback.
+
+An encoder change rewrites every document vector, so it is a data migration, not a model hot-swap. Re-embed the corpus into a new generation tagged with the encoder digest (about 5.6 A100-hours for 10M docs here), mirror 5% of queries to it and compare NDCG@10, Recall@100 and top-10 overlap with the live generation, then ramp 1%, 10%, 50%, 100% with click-through and reformulation-rate guardrails. Keep the old generation loaded for 72 hours, which doubles index RAM for that window, and key the result cache on the generation id so the cut-over invalidates it automatically.

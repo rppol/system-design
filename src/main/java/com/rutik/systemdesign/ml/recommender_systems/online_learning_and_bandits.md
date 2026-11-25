@@ -816,6 +816,30 @@ Thompson Sampling takes about 22% less regret than **fixed** epsilon-greedy here
 
 **Pitfall 5 — Ignoring delayed rewards in UCB update**: A recommendation was logged at t=100; the purchase (reward) happened at t=500. The UCB algorithm updated the arm at t=100 with reward=0 (no immediate click) and never received the purchase signal at t=500. Result: arms that drive conversions were systematically undervalued. Fix: implement delayed reward attribution — track all pending (arm, timestamp) pairs; when a reward arrives with attribution window up to W minutes, update all arms within that window. Use a reward buffer with TTL = attribution_window.
 
+**Pitfall 3 as code: inverting A from scratch every step.**
+
+```python
+# BROKEN: explicit inverse of a nearly singular matrix, O(d^3) per update
+import numpy as np
+
+A = np.eye(d) * 1e-6
+A += np.outer(x, x)
+b += r * x
+theta = np.linalg.inv(A) @ b
+```
+
+```python
+# FIX: ridge prior lambda * I, and keep A^-1 with a Sherman-Morrison rank-1 update, O(d^2)
+lam = 1.0
+A_inv = np.eye(d) / lam                          # once, at arm creation
+Ax = A_inv @ x
+A_inv -= np.outer(Ax, Ax) / (1.0 + x @ Ax)
+b += r * x
+theta = A_inv @ b
+```
+
+With almost no prior and few observations, `A` is close to singular in every rarely seen direction, so the explicit inverse returns huge or NaN values. The broken service then fails or recommends at random. A ridge prior keeps `A` well conditioned from the first step, and the rank-1 update keeps the cost at O(d^2), which for d = 500 is 250,000 operations rather than 125 million.
+
 ---
 
 ## 11. Technologies & Tools
@@ -994,3 +1018,34 @@ RESULTS after 6 weeks:
     Catalog long-tail exposure: +28% (new videos surfaces 28% more to users)
     Thompson vs. epsilon-greedy (simulated): 23% less regret in first 10K trials per arm
 ```
+
+**BROKEN → FIX: ranking the exploration slots by posterior mean.** Keeping the Beta posteriors but
+replacing the sample with its mean turns Thompson sampling back into greedy selection.
+
+```python
+import numpy as np
+
+
+# BROKEN: pick the k arms with the highest posterior MEAN
+def pick_greedy(wins: np.ndarray, pulls: np.ndarray, k: int) -> np.ndarray:
+    mean = (1 + wins) / (2 + pulls)               # mean of Beta(1 + wins, 1 + losses)
+    return np.argsort(-mean)[:k]
+# a video that went 2-for-2 early (mean 0.75) stays on top; one that started 0-for-3 (mean 0.20)
+# is never shown again, however good it is
+```
+
+```python
+# FIX: one posterior draw per arm per request, then take the top k draws
+def pick_thompson(wins: np.ndarray, pulls: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
+    theta = rng.beta(1 + wins, 1 + pulls - wins)
+    return np.argsort(-theta)[:k]
+
+
+rng = np.random.default_rng()
+slots = pick_thompson(wins, pulls, k=8, rng=rng)
+```
+
+The draw is what explores: an arm with few pulls has a wide posterior, so it sometimes samples high and
+gets shown, and the chance shrinks automatically as evidence piles up. With rewards arriving after a delay
+(the < 5 minute Flink lag), many requests are served from the same posterior, and sampling keeps them
+spread across plausible arms instead of sending all of them to the current leader.

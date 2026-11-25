@@ -1020,6 +1020,14 @@ OVMS deployment as CV models.
   effectively open. Put an authenticating reverse proxy in front.
 - **P-core/E-core scheduling surprise on a client CPU.** Streams landed on slow E-cores,
   halving throughput; `scheduling_core_type=PCORE_ONLY` fixed it.
+- **Benchmarked on AMX, shipped to AVX2.** INT8 latency measured on a Sapphire Rapids dev
+  box (AMX) did not hold on the older AVX2-only part of the fleet, because the CPU plugin
+  dispatches to the widest ISA the host exposes (§6.7). Reproduce the fleet's code path on
+  the fast box by capping dispatch: `OV_CPU_MAX_ISA=AVX2 ONEDNN_MAX_CPU_ISA=AVX2`. The two
+  variables are independent (the first caps OpenVINO's own kernels, the second oneDNN
+  primitives), so set both. Since `[2026.4.1]` the `OV_CPU_MAX_ISA` cap works in release
+  builds; before that it was a debug-build-only capability, so setting it on a release wheel
+  did not cap anything.
 
 ---
 

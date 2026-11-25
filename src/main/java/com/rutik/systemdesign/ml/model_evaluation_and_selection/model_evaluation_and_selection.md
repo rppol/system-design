@@ -41,6 +41,15 @@ Key insight: the test set must remain completely unseen until final evaluation. 
 4. **Metric must match the business objective**: a spam filter prioritizes recall (catch all spam) over precision (occasional false positives acceptable). A fraud block system may prioritize precision (blocking a legitimate transaction is costly).
 5. **Probability calibration is separate from discrimination**: a model can rank examples perfectly (AUC-ROC = 0.95) but output poorly calibrated probabilities (model says 90% for events that actually happen 60% of the time). Both matter for decision thresholds.
 
+**Principle 2 in numbers — how often a random fold has no positives.** Take 500 rows with 5 positives (1%) and plain 5-fold `KFold(shuffle=True)`, 100 rows per fold. A given fold misses every positive with the hypergeometric probability:
+
+```
+P(fold has 0 positives) = (400/500) x (399/499) x (398/498) x (397/497) x (396/496) = 0.326
+P(at least one of the 5 folds has 0 positives) ~ 0.96   (Monte Carlo, 400,000 shuffles)
+```
+
+So on 96% of random splits at least one validation fold contains no positives, its ROC-AUC is undefined, and the other folds share the 5 positives among them, so per-fold recall moves in steps of 33 to 100 points. `StratifiedKFold` puts exactly one positive in each fold here; at this size the real fix is more positives or repeated stratified CV, because one positive per fold is still a noisy estimate.
+
 ---
 
 ## 4. Types / Architectures / Strategies

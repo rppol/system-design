@@ -2,6 +2,8 @@
 
 *Recommendation reframed as sequence generation — semantic IDs, RQ-VAE tokenization, HSTU, and retrieval-as-decoding.*
 
+> Papers, production numbers and repository facts on this page were checked against arXiv, the Shopify and NVIDIA engineering posts and the cited repositories on 2026-11-25.
+
 > Deep-dive sub-file of [Deep Learning Recommenders](./deep_learning_recommenders.md), expanding
 > its Section 4.7 semantic-ID material into its own module. Cross-reads:
 > [retrieval_and_ranking](retrieval_and_ranking.md) for the classical
@@ -19,7 +21,7 @@ Generative recommenders — TIGER (Google, 2023) and HSTU (Meta, 2024) are the t
 
 This module is the generative half of the recommender-systems module: it assumes the two-tower, DLRM, and SASRec material from `deep_learning_recommenders.md` as background and goes deep on what changes when items stop being atomic IDs — the RQ-VAE tokenizer, HSTU's modified attention, beam search as retrieval, and why this is the one place in classical recsys where LLM-style scaling laws start to apply.
 
-**Production adoption signal**: This is no longer a research-only idea. Meta reports HSTU running in production ranking and retrieval; Shopify has rebuilt its commerce recommendation engine on HSTU; Google's TIGER established the RQ-VAE-plus-decoder recipe on public benchmarks; Snap has published its own production semantic-ID design; and Kuaishou's OneRec replaced the whole retrieve-then-rank cascade with one generative model for 25% of its main-feed traffic (Section 7 gives the numbers for each). Meta, Shopify and Snap ship generative retrieval beside the incumbent stack; OneRec is the one published full replacement, and it reached parity with the cascade before alignment produced the gains (Section 4.6). Section 4.4 and Section 13 explain why the additive path stays the default.
+**Production adoption signal**: This is no longer a research-only idea. Meta's HSTU paper reports a 1.5-trillion-parameter generative recommender deployed on multiple surfaces with a 12.4% online A/B improvement; Shopify built its commerce recommender on HSTU; Google's TIGER established the RQ-VAE-plus-decoder recipe on public benchmarks; Snap has published its production semantic-ID design and an LLM-based generative retriever that beat its own TIGER-style baseline online; and Kuaishou's OneRec replaced the whole retrieve-then-rank cascade with one generative model for about 25% of total QPS in its two main apps (Section 7 gives the numbers for each). Shopify and Snap ship generative retrieval inside an ensemble beside other candidate sources; OneRec is the one published full replacement, and it reached parity with the cascade before alignment produced the gains (Section 4.6). Section 4.4 and Section 13 explain why the additive path stays the default.
 
 **Scope of this module** relative to the parent:
 
@@ -152,8 +154,11 @@ system:
   ratio for negative-advantage samples and drops the KL term. Rewards: a learned personalized
   preference score (P-Score), a format reward for IDs that map to real items, and industrial
   rewards (one cut viral-content exposure by 9.59%).
-- **Serving**: 512 items generated per request on NVIDIA L20 GPUs with TensorRT, followed by an
-  optional reward-model selection step.
+- **Serving**: inference on NVIDIA L20 GPUs (4 per server, PCIe), with the computation graph compiled
+  by TensorRT. The model generates semantic IDs, maps them back to videos, and can add an optional
+  reward-model selection step over the generated items. Beam search beat top-k plus top-p sampling for
+  generating candidates. For RL data, 1% of users route to an external service that generates 512
+  items each and scores them with the reward model.
 
 The report states that over 50% of the cascade's serving resources went to communication and
 storage between stages rather than model computation; collapsing it to one model is what lets OneRec run 10x the model FLOPs at
@@ -343,7 +348,7 @@ flowchart LR
     subgraph onerec["OneRec: one encoder-decoder"]
         u2(["Request"]) --> enc["Encoder<br/>4 user pathways"]
         enc --> dec["MoE decoder<br/>BOS + 3 semantic IDs"]
-        dec --> gen(["512 generated items"])
+        dec --> gen(["Generated items"])
         gen --> sel["Reward-model<br/>selection"]
         sel --> o2(["Feed"])
         rm["Reward system<br/>P-Score, format, industrial"] -. "ECPO post-training" .-> dec
@@ -610,7 +615,9 @@ def encode(emb: np.ndarray, codebooks: list[np.ndarray]) -> np.ndarray:
 
 items = np.random.default_rng(1).normal(size=(5000, 32)).astype(np.float32)
 sids = encode(items, fit_rq_kmeans(items, n_levels=3, k=64))
-# every level uses all 64 codes; 4,947 of 5,000 items get a unique 3-token ID
+unique_frac = len({tuple(r) for r in sids}) / len(sids)
+# uniform assignment over 64^3 = 262,144 IDs would leave about 98% of items with a unique ID;
+# the exact count from this run depends on the NumPy version
 ```
 
 K-means assigns every point to its nearest centroid and moves each centroid to its members' mean, so
@@ -618,18 +625,52 @@ centroids follow the data and an empty cluster can be re-seeded directly, while 
 entry goes dead when the encoder stops routing to it and no gradient brings it back.
 The OneRec report measures this at 3 levels of 8,192 codes: reconstruction loss 0.0410 against
 0.0548 for RQ-VAE (25% lower), codebook utilization 1.0 at every level against 0.9963 and 0.9958 at
-RQ-VAE's levels 2 and 3, and higher token entropy at every level. The 53 collisions in the toy run
+RQ-VAE's levels 2 and 3, and higher token entropy at every level. The few collisions in the toy run
 above are what the uniqueness token, or a wider last level, exists for.
+
+### Worked Example: How Many Collisions to Expect Before Training
+
+"The address space is bigger than the catalogue" does not mean "no collisions". If `n` items landed on
+`M` IDs uniformly at random, the chance a given item has its ID to itself is `(1 - 1/M)^(n-1)`, about
+`exp(-n / M)`, and the expected number of colliding pairs is about `n^2 / (2M)`. Real content embeddings
+cluster, so uniform assignment is the *best* case.
+
+```python
+import math
+
+
+def collision_budget(n_items: int, codebook_widths: list[int]) -> tuple[int, float, float]:
+    """Address space, best-case unique fraction, and expected colliding pairs."""
+    space = math.prod(codebook_widths)
+    unique_frac = math.exp(-(n_items - 1) / space)
+    colliding_pairs = n_items * n_items / (2 * space)
+    return space, unique_frac, colliding_pairs
+
+
+for n, widths in ((3_000_000, [256, 256, 256]), (50_000_000, [1024, 512, 256])):
+    space, uniq, pairs = collision_budget(n, widths)
+    print(f"{n:>11,} items, {space:>12,} IDs: unique {uniq:.1%}, ~{pairs:,.0f} colliding pairs")
+#   3,000,000 items,   16,777,216 IDs: unique 83.6%, ~268,221 colliding pairs
+#  50,000,000 items,  134,217,728 IDs: unique 68.9%, ~9,313,226 colliding pairs
+```
+
+Two readings matter. First, a 5.6x headroom (`16.7M / 3M`) still leaves about one item in six sharing
+its ID even in the uniform best case, so the uniqueness token in Section 10 Pitfall 4 is not optional.
+Second, Snap measured 32.1% of videos with a unique ID on its `1024 x 512 x 256` codebooks
+(Section 7). Uniform assignment would fall that low only at about `-ln(0.321) x 134.2M ≈ 153M` items,
+more than the whole address space. The gap is the clustering of real content embeddings, which is why
+Snap added a co-engagement contrastive loss and why utilization and uniqueness must be measured after
+training rather than inferred from `codebook_size^n_levels`.
 
 **Decoding OneRec's serving economics.** The report's numbers, cascade against OneRec:
 
-| Quantity | Cascade | OneRec |
+| Quantity | Cascade (its ranking models) | OneRec |
 |----------|---------|--------|
 | Training MFU on flagship GPUs | 4.6% | 23.7% (5.2x) |
 | Inference MFU | 11.2% | 28.8% (2.6x) |
 | Model FLOPs per request | 1x | 10x |
 | Operating cost (OPEX) | 100% | 10.6% |
-| Items produced per request | multi-stage funnel | 512 generated, then reward-model selection |
+| Items produced per request | multi-stage funnel | generated semantic IDs, then optional reward-model selection |
 
 The cascade is cheap per FLOP but spends over half its serving resources moving features and
 candidates between stages. One dense encoder-decoder pass keeps GPUs busy with matrix math, so 10x
@@ -639,13 +680,13 @@ the FLOPs still costs about a tenth as much to run.
 
 ## 7. Real-World Examples
 
-**Meta HSTU (2024)**: Meta introduced Hierarchical Sequential Transduction Units as a generative-recommender architecture that reframes ranking and retrieval as sequence generation over a user's interleaved items and actions, modifying Transformer attention (SiLU-based weighting in place of softmax, relative attention bias, elementwise gating) to preserve signal over long histories and fuse efficiently at production scale. Reported production kernel work moved model FLOPs utilization from 7.65% to 31.40% on two DGX H100 nodes and cut PyTorch AOTInductor inference time by 1.14x-2.38x depending on caching, with an MLPerf submission reaching 99,997 queries/sec. Source: [NVIDIA — How Generative Recommenders Are Redefining RecSys at Scale](https://developer.nvidia.com/blog/how-generative-recommenders-are-redefining-recsys-at-scale).
+**Meta HSTU (2024)**: Meta introduced Hierarchical Sequential Transduction Units (Zhai et al., "Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations," ICML 2024, [arXiv:2402.17152](https://arxiv.org/abs/2402.17152)) as a generative-recommender architecture that reframes ranking and retrieval as sequence generation over a user's interleaved items and actions, modifying Transformer attention (SiLU-based weighting in place of softmax, relative attention bias, elementwise gating). The paper reports up to 65.8% higher NDCG than baselines on synthetic and public datasets, a kernel 5.3x to 15.2x faster than FlashAttention2-based Transformers at 8,192-length sequences, and a 1.5-trillion-parameter deployment that improved online A/B metrics by 12.4% across multiple surfaces, with quality scaling as a power law of training compute across three orders of magnitude. NVIDIA's open-source `recsys-examples` implementation of HSTU later raised end-to-end training MFU from 7.65% to 31.40% on two DGX H100 nodes; for inference under Triton it reports 1.14x-1.28x over the Python backend with PyTorch AOTInductor alone and up to 2.38x with KV and embedding caches, and 99,997 queries/sec on the MLPerf DLRM v3 benchmark, which is based on HSTU. Sources: the HSTU paper; [NVIDIA — How Generative Recommenders Are Redefining RecSys at Scale](https://developer.nvidia.com/blog/how-generative-recommenders-are-redefining-recsys-at-scale).
 
-**Shopify's commerce recommendation engine**: Shopify built its 2026 recommendation engine on HSTU, reporting that the architecture "aligned well with our problem and also showed encouraging scaling behavior, where validation loss improves as model capacity grows" — the scaling-law relationship Section 3 describes. Shopify's online A/B test (their August model) reported +0.94% Shop orders, +5% high-quality CTR, +0.71% conversion rate, and +4.8% served-product recall@2, with a 7.3x training-pipeline speedup over their baseline. Shopify describes moving next from product-ID space to a semantic-ID token space to shrink the retrieval vocabulary and enable direct integration with text queries and assistant interactions. Source: [Shopify Engineering — Generative Recommendations](https://shopify.engineering/generative-recommendations).
+**Shopify's commerce recommendation engine**: Shopify's February 2026 engineering post describes a generative recommender that started from HSTU, which "aligned well with our problem and also showed encouraging scaling behavior, where validation loss improves as model capacity grows" — the scaling-law relationship Section 3 describes — and then added RoPE-inspired timestamp encoding with relative attention bias, shared and positive-aware hard negatives, and custom CUDA kernels (up to a 7.3x training-pipeline speedup over a baseline implementation). It runs inside a retrieval ensemble and is trained to add *incremental* recall the other retrievers miss. Online A/B results for its August model version: +0.94% Shop orders, +5% high-quality CTR, +0.71% conversion rate, and +4.8% final served-product recall@2. Shopify describes moving next from product-ID space to a semantic-ID token space to shrink the retrieval vocabulary and enable direct integration with text queries and assistant interactions. Source: [Shopify Engineering — The generative recommender behind Shopify's commerce engine](https://shopify.engineering/generative-recommendations).
 
 **Google TIGER**: TIGER (Rajput et al., "Recommender Systems with Generative Retrieval," NeurIPS 2023) trains an RQ-VAE over item content embeddings to derive hierarchical semantic IDs, then trains a seq2seq Transformer to generate the target item's semantic ID directly, replacing nearest-neighbor retrieval with decoding. On the Amazon Beauty benchmark TIGER reported up to a 29% NDCG@5 improvement over SASRec, and up to 21% NDCG@5 / 15% NDCG@10 on Amazon Toys and Games, with reported gains on cold-start items that a nearest-neighbor content baseline could not match. Source: [Recommender Systems with Generative Retrieval (arXiv:2305.05065)](https://arxiv.org/pdf/2305.05065).
 
-**Snapchat semantic IDs**: Snap published its production semantic-ID design for content recommendation, building on TIGER and RQ-VAE: a 3-level residual codebook (widths 1024/512/256, giving a theoretical ~134M-ID space) over multimodal video-text embeddings, extended with a Personalized-PageRank co-engagement contrastive loss so frequently co-engaged videos cluster in ID space rather than relying on content similarity alone. Snap reported 49.1% code utilization and 32.1% of videos receiving unique semantic IDs after this supervision, materializing generated IDs to videos via a lookup table rather than real-time retrieval. Source: [arXiv:2607.28895](https://arxiv.org/html/2607.28895).
+**Snapchat semantic IDs**: Snap's SnapLGR paper ("LLM-Based Generative Retrieval for Snapchat Content Recommendation," [arXiv:2607.28895](https://arxiv.org/abs/2607.28895)) describes a production generative retriever for short video. Semantic IDs come from a 3-level residual codebook (widths 1024/512/256, a theoretical ~134M-ID space) over Qwen3-VL multimodal video embeddings, extended with a Personalized-PageRank co-engagement contrastive loss so frequently co-engaged videos cluster in ID space rather than relying on content similarity alone; the best variant reached 49.1% code utilization with 32.1% of videos receiving unique semantic IDs. A pretrained LLM is taught the new ID tokens by continued pretraining, then fine-tuned on interaction sequences, and served with TensorRT-LLM beam search; generated IDs are materialized to videos through an SID-to-video lookup table. In a live A/B test against Snap's existing TIGER-style generative retriever it raised View Time by 0.37% and Time Spent by 0.09%. Source: [arXiv:2607.28895](https://arxiv.org/html/2607.28895).
 
 **Kuaishou OneRec**: OneRec (arXiv:2502.18965, February 2025; OneRec Technical Report, arXiv:2506.13695, June 2025) is an encoder-decoder generative recommender with an MoE decoder, RQ-Kmeans semantic IDs (3 levels of 8,192 codes) and RL post-training with ECPO, deployed as an end-to-end replacement of the retrieve-then-rank cascade. It handles about 25% of total QPS in the Kuaishou and Kuaishou Lite apps, with App Stay Time +0.54% and +1.24% and Watch Time +1.98% and +3.28% respectively, at 10.6% of the cascade's operating cost. The pure generative model without reward-model selection reported only +0.01% and +0.06% Stay Time, so the first milestone was parity, and preference alignment produced the measured gains. In Kuaishou's Local Life Service it serves 100% of traffic, with GMV +21.01% and orders +17.89%. Source: [OneRec Technical Report (arXiv:2506.13695)](https://arxiv.org/abs/2506.13695).
 
@@ -653,10 +694,10 @@ the FLOPs still costs about a tenth as much to run.
 
 | Company | Architecture | Headline reported number |
 |---------|--------------|-----------------------------|
-| Meta | HSTU | FLOPs utilization 7.65% -> 31.40% on H100 nodes; 1.14x-2.38x AOTInductor inference speedup; MLPerf 99,997 queries/sec |
-| Shopify | HSTU | +0.94% Shop orders, +5% high-quality CTR, +0.71% conversion, +4.8% served-product recall@2, 7.3x training-pipeline speedup |
+| Meta | HSTU | 1.5T-parameter deployment, +12.4% online A/B; kernel 5.3x-15.2x faster than FlashAttention2 at 8,192 tokens. NVIDIA `recsys-examples`: training MFU 7.65% -> 31.40% on H100 nodes, MLPerf DLRM v3 99,997 queries/sec |
+| Shopify | HSTU | +0.94% Shop orders, +5% high-quality CTR, +0.71% conversion, +4.8% served-product recall@2, up to 7.3x training-pipeline speedup |
 | Google | TIGER (RQ-VAE + seq2seq) | Up to 29% NDCG@5 improvement over SASRec on Amazon Beauty; 21% NDCG@5 / 15% NDCG@10 on Amazon Toys and Games |
-| Snap | Semantic IDs (RQ-VAE + PPR co-engagement loss) | 49.1% code utilization; 32.1% of videos assigned unique semantic IDs |
+| Snap | SnapLGR (semantic IDs with PPR co-engagement loss + LLM decoder) | 49.1% code utilization; 32.1% of videos with unique IDs; +0.37% View Time vs its TIGER-style baseline |
 | Kuaishou | OneRec (RQ-Kmeans + MoE encoder-decoder + ECPO) | 25% of QPS; Stay Time +0.54% / +1.24%; OPEX 10.6% of cascade; MFU 23.7% train / 28.8% inference |
 
 Every number above is specific to its own benchmark or production surface (they are not directly comparable across rows), but the pattern across all five is the same one Section 3 predicts: validation loss or ranking quality keeps improving as capacity or supervision increases, rather than saturating the way a per-item embedding table does.
@@ -749,11 +790,56 @@ Recall gains from widening the beam taper off well before latency does — the m
 
 **Pitfall 4 — No uniqueness token, so two live SKUs are permanently indistinguishable**: A marketplace shipped semantic IDs without TIGER's 4th uniqueness token, reasoning that `n_levels=3, codebook_size=256` gave "plenty" of headroom over their catalogue. Two visually near-identical variants of the same product (different colorway, near-identical title and image) landed on the exact same 3-token ID, and `detokenize` had no way to tell them apart — one of the two became permanently unretrievable, silently, because the ID-to-item lookup could only hold one mapping per key and the second write overwrote the first. Nobody noticed until a seller complained their listing had vanished from search. **Fix**: always append a dedicated uniqueness/collision token that is not learned by the quantizer — a plain counter over items that already share the first `n_levels` tokens — so a collision produces a longer, still-unique ID rather than a silent overwrite, and alert whenever the counter for any prefix exceeds a small threshold (a systemic collision pattern, not an isolated one).
 
+```python
+from collections import defaultdict
+
+SemanticID = tuple[int, ...]
+
+
+# BROKEN: the second item with the same 3 tokens silently overwrites the first
+def build_lookup_broken(assignments: list[tuple[int, SemanticID]]) -> dict[SemanticID, int]:
+    lookup: dict[SemanticID, int] = {}
+    for item_id, sid in assignments:
+        lookup[sid] = item_id
+    return lookup
+
+
+# FIX: append a collision counter so every item keeps a distinct, decodable ID
+def build_lookup(
+    assignments: list[tuple[int, SemanticID]], max_per_prefix: int = 8
+) -> tuple[dict[SemanticID, int], dict[int, SemanticID]]:
+    lookup: dict[SemanticID, int] = {}
+    item_to_sid: dict[int, SemanticID] = {}
+    seen: defaultdict[SemanticID, int] = defaultdict(int)
+    for item_id, sid in sorted(assignments):           # stable order => stable counters
+        k = seen[sid]
+        if k >= max_per_prefix:
+            raise ValueError(f"prefix {sid} holds {k + 1} items: resize codebooks (Pitfall 1)")
+        full = (*sid, k)
+        lookup[full] = item_id
+        item_to_sid[item_id] = full
+        seen[sid] += 1
+    return lookup, item_to_sid
+
+
+if __name__ == "__main__":
+    pairs = [(101, (214, 87, 3)), (102, (214, 87, 3)), (103, (9, 40, 7))]
+    print(len(build_lookup_broken(pairs)))     # 2 -> item 101 is unretrievable
+    lookup, _ = build_lookup(pairs)
+    print(sorted(lookup))                      # [(9, 40, 7, 0), (214, 87, 3, 0), (214, 87, 3, 1)]
+```
+
+The decoder then generates four tokens, the last from a small counter vocabulary of `max_per_prefix`
+entries, and the `max_per_prefix` guard turns a creeping Pitfall 1 collapse into a failed tokenization
+job instead of a quiet ranking of near-duplicates. Sort the assignments by a stable key before counting,
+or the same two items swap counters between re-tokenization runs and the decoder's learned mapping goes
+stale.
+
 **Pitfall 5 — Unmonitored invalid decodes shrink the effective top-K**: A team's beam search returned `beam_width=20` candidates per request, and dashboards showed a healthy top-20 recall number. Only when a deeper audit sampled raw beam output did anyone notice that on average 6 of the 20 beams decoded to semantic IDs with no entry in `id_to_item` — syntactically valid token sequences the decoder had learned to produce but that no real item had ever been assigned, a natural consequence of the vocabulary being combinatorially larger (`256^3` ≈ 16.7M) than the catalogue (a few million items) it needed to cover. The system silently fell through to the next-ranked beam candidate for each invalid one, so users effectively received a top-14 list dressed up as a top-20 one, and nobody had instrumented the invalid-decode rate to notice. **Fix**: log and alert on the fraction of beam candidates that fail `detokenize` per request, treat a rising rate as a signal the decoder is drifting from the tokenizer's actual assignment surface (often after a re-tokenization that the decoder was not retrained against), and size `beam_width` with that expected loss rate built in rather than assuming every beam candidate resolves to a real item.
 
 **Pitfall 6 — Evaluating against ground truth logged by the incumbent retriever**: A team measured recall@100 for a new generative retriever against "ground truth" positives drawn from click logs — but those logs were generated by users who could only click on what the incumbent two-tower + ANN system had surfaced to them in the first place. Items the generative retriever newly surfaced, which the old ANN system structurally could never have shown, had no chance of appearing as a logged positive, so the metric was mechanically biased toward crediting only the overlap between the two systems and blind to the generative retriever's actual novel contribution. The offline number looked like a wash; the team nearly shelved the project on a metric that could not, by construction, see its main advantage. **Fix**: pair offline recall against historical logs with either an online interleaving experiment or a full A/B test where the generative retriever gets its own exposure, so its novel candidates get a real chance to be clicked and counted — never trust an offline metric whose ground truth was generated exclusively by the system being replaced.
 
-**Pitfall 7 - Expecting the end-to-end generator alone to beat the cascade**: Kuaishou's OneRec Technical Report gives the reference numbers. With generation alone, OneRec moved App Stay Time by +0.01% on Kuaishou and +0.06% on Kuaishou Lite, a statistical tie with a cascade that years of tuning had built. The significant gains (+0.54% and +1.24%) arrived only with the reward-model selection step over the 512 generated items and RL post-training against a preference reward. A team that ramps a generative replacement and judges it on the SFT model alone will either cancel a project that is on track, or ship parity and call it a win. **Fix**: set parity with the cascade as the first gate, budget the reward system (learned preference score, format reward for valid IDs, business rewards) as part of the project rather than a follow-up, and keep the cascade serving through the ramp.
+**Pitfall 7 - Expecting the end-to-end generator alone to beat the cascade**: Kuaishou's OneRec Technical Report gives the reference numbers. With generation alone, OneRec moved App Stay Time by +0.01% on Kuaishou and +0.06% on Kuaishou Lite, a statistical tie with a cascade that years of tuning had built. The significant gains (+0.54% and +1.24%) arrived only with the reward-model selection step over the generated items and RL post-training against a preference reward. A team that ramps a generative replacement and judges it on the SFT model alone will either cancel a project that is on track, or ship parity and call it a win. **Fix**: set parity with the cascade as the first gate, budget the reward system (learned preference score, format reward for valid IDs, business rewards) as part of the project rather than a follow-up, and keep the cascade serving through the ramp.
 
 ### Pitfall Summary — Signal to Watch, Fix in One Line
 
@@ -806,7 +892,7 @@ The RQ-VAE is trained to quantize embeddings from one specific content-embedding
 **Q: Why did OneRec's generative model alone only tie the cascade it replaced?**
 **Short:** Supervised next-item generation imitates what the cascade already served; OneRec's online gains came from reward-model selection and RL post-training.
 
-Trained only to predict logged next items, a generator learns the distribution the cascade already produced, so parity is the expected result. Kuaishou's OneRec Technical Report shows exactly that: the pure generative model moved App Stay Time +0.01% and +0.06% on its two apps, while the version with a reward-model selection pass over 512 generated items reached +0.54% and +1.24%. RL post-training with ECPO pushes the generator toward a learned preference score (P-Score), a format reward that penalizes IDs mapping to no real item, and business rewards, which is the signal imitation alone cannot supply. The practical rule: gate the first ramp on parity, and scope the reward system into the project from the start.
+Trained only to predict logged next items, a generator learns the distribution the cascade already produced, so parity is the expected result. Kuaishou's OneRec Technical Report shows exactly that: the pure generative model moved App Stay Time +0.01% and +0.06% on its two apps, while the version with a reward-model selection pass over its generated items reached +0.54% and +1.24%. RL post-training with ECPO pushes the generator toward a learned preference score (P-Score), a format reward that penalizes IDs mapping to no real item, and business rewards, which is the signal imitation alone cannot supply. The practical rule: gate the first ramp on parity, and scope the reward system into the project from the start.
 
 **Q: How do you A/B a generative retriever against an incumbent two-tower fairly?**
 **Short:** Give the new candidates real exposure online — an offline metric against old logs cannot credit them.
@@ -861,7 +947,7 @@ Vanilla softmax attention normalizes its weights to sum to 1 across the sequence
 **Q: Why does HSTU replace softmax with pointwise SiLU-based weighting specifically?**
 **Short:** SiLU weighting avoids softmax's normalization bottleneck and fuses more efficiently into a single production attention kernel.
 
-Softmax requires computing a normalization constant across the whole attention row before any individual weight is final, which is both the signal-dilution issue over long sequences (previous question) and a computational bottleneck that resists simple kernel fusion. Pointwise SiLU-based weighting scores each position independently — no cross-position normalization step — which both avoids the long-sequence signal dilution and is friendlier to fuse into a single efficient kernel alongside the relative attention bias and elementwise gating HSTU also uses. Meta's reported production kernel work (moving FLOPs utilization from 7.65% to 31.40% on H100 nodes, Section 7) is the direct payoff of an attention formulation designed for fusion, not just for accuracy.
+Softmax requires computing a normalization constant across the whole attention row before any individual weight is final, which is both the signal-dilution issue over long sequences (previous question) and a computational bottleneck that resists simple kernel fusion. Pointwise SiLU-based weighting scores each position independently — no cross-position normalization step — which both avoids the long-sequence signal dilution and is friendlier to fuse into a single efficient kernel alongside the relative attention bias and elementwise gating HSTU also uses. The HSTU paper reports its fused kernel running 5.3x to 15.2x faster than FlashAttention2-based Transformers at 8,192-length sequences, and NVIDIA's `recsys-examples` implementation later raised end-to-end training MFU from 7.65% to 31.40% on two DGX H100 nodes (Section 7) — the direct payoff of an attention formulation designed for fusion, not just for accuracy.
 
 **Q: How do retrieval and ranking converge into one model in a generative recommender, and when should they not?**
 **Short:** Beam-search log-probability can double as both the retrieval score and the ranking score of the same generative model.
@@ -879,7 +965,7 @@ The moment a new item's content embedding is computed — from its title, descri
 Train the RQ-VAE tokenizer on item content embeddings and the sequence decoder on existing interaction logs, then deploy it as an *additional* candidate source merged with the incumbent two-tower's ANN output, not a replacement — the ranker keeps seeing the same familiar candidate mix plus a smaller injected fraction from generative retrieval. Validate offline recall lift, then run an online A/B test measuring engagement, not just recall, because generative retrieval shifts the candidate distribution the ranker was trained on (Section 10 Pitfall 3) and that shift only shows up online. Only after the ranker has been retrained or fine-tuned on the blended distribution, and the online metric confirms a real win, consider narrowing or retiring the two-tower path.
 
 **Q: How did Kuaishou's OneRec replace the retrieve-then-rank cascade, and why is it cheaper to run?**
-**Short:** One encoder-decoder generates the feed as semantic IDs and a reward model selects from 512 outputs; higher GPU utilization gave 10x the FLOPs at 10.6% of cascade OPEX.
+**Short:** One encoder-decoder generates the feed as semantic IDs, optionally filtered by a reward model; higher GPU utilization gave 10x the FLOPs at 10.6% of cascade OPEX.
 
 The encoder reads four user pathways (profile, last 20 interactions, 256 high-engagement interactions, and up to 100,000 lifelong videos compressed to 128 tokens); an MoE decoder emits each item as 3 semantic-ID tokens. The cascade ran ranking models at 4.6% training and 11.2% inference MFU and spent over half its serving resources on communication and storage between stages. One large model pass reached 23.7% and 28.8% MFU, so 10x the model FLOPs ran at 10.6% of the cascade's operating cost. It serves about 25% of QPS in the Kuaishou apps and 100% of Local Life Service traffic. The cascade stays deployed through the ramp as the rollback path, which is the part of the additive strategy a full replacement keeps.
 
@@ -957,6 +1043,50 @@ flowchart LR
 | 2 -> 3 | Invalid-decode rate (Pitfall 5); ranker calibration on blended distribution | Invalid-decode rate low and monitored, not just measured once | Beam candidates resolving to no real listing at a rate nobody is tracking, silently shrinking effective top-K |
 | 3 -> 4 | Online engagement delta; cold-start-listing early-life visibility delta; p99 latency vs budget | Engagement flat-or-up, visibility clearly up, latency inside budget | Offline recall lift that does not show up online (Pitfall 3) — the exact failure this phasing exists to catch before it reaches every user |
 
+**BROKEN -> FIX: the Phase 2 merge let the generative path exceed its injection fraction.** The first
+blend concatenated the two candidate lists and truncated to the ranker's 500-candidate input. The
+generative path returned its candidates first, overlapped the incumbent on popular listings, and was
+never deduplicated, so at a configured 5% injection the ranker saw about 18% generative candidates on
+cold-start-heavy queries and a handful of duplicates per request. That is Pitfall 3 reintroduced by a
+merge function, at a fraction nobody had validated the ranker on.
+
+```python
+def merge_broken(incumbent: list[int], generative: list[int], k: int = 500) -> list[int]:
+    # BROKEN: order decides the mix, duplicates count twice, no cap on the injected share
+    return (generative + incumbent)[:k]
+
+
+def merge(incumbent: list[int], generative: list[int], k: int = 500, inject: float = 0.05) -> list[int]:
+    # FIX: dedupe, spend the injection budget on candidates the incumbent did not already find,
+    # cap the generative share at `inject`, and fill the rest from the incumbent
+    budget = int(k * inject)
+    inc_set = set(incumbent)
+    novel = [i for i in dict.fromkeys(generative) if i not in inc_set]
+    out = novel[:budget]
+    seen = set(out)
+    for item in incumbent:
+        if len(out) == k:
+            break
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+if __name__ == "__main__":
+    incumbent = list(range(1000, 1500))                               # 500 ANN candidates, best first
+    generative = list(range(1000, 1060)) + list(range(9000, 9030))    # 60 popular overlaps + 30 novel
+    broken, fixed = merge_broken(incumbent, generative), merge(incumbent, generative)
+    print(len(broken), len(set(broken)))                              # 500 440
+    print(len(fixed), len(set(fixed)), sum(i >= 9000 for i in fixed)) # 500 500 25
+```
+
+In the broken version the generative path takes the first 90 of the 500 slots (18%), and its 60
+popular overlaps appear again among the incumbent's top candidates, so the ranker sees only 440 distinct
+items. The fixed merge keeps exactly 25 generative slots (5% of 500), spends them on listings the
+incumbent did not already retrieve, and passes 500 distinct candidates. The injection fraction is now a
+real, auditable rollout knob, which is the property Phase 4's gradual increase depends on.
+
 **What the memory arithmetic actually saves**: The atomic-ID embedding table for 50M items at `latent_dim=32` costs `50,000,000 x 32 = 1,600,000,000` floats. The RQ-VAE codebooks for this design cost `(1024 + 512 + 256) x 32 = 57,344` floats total — a roughly 27,900x smaller floating-point table, because the codebooks are shared across the whole catalogue rather than allocated per item. A `50M x 3` integer semantic-ID lookup table is still needed and still grows with catalogue size, but integers are far cheaper to store and update than a 32-float row per item, and unlike a FAISS index this table needs no approximate-nearest-neighbor structure to rebuild — a straight key-value write suffices.
 
 ```python
@@ -989,7 +1119,7 @@ print(f"Float-table shrink: {memory_ratio:,.0f}x")
 # Atomic-ID table:  1,600,000,000 floats (6.40 GB)
 # RQ-VAE codebooks: 57,344 floats (0.229 MB)
 # Semantic-ID table: 150,000,000 integers (not floats)
-# Float-table shrink: 27,900x
+# Float-table shrink: 27,902x
 ```
 
 **What decode latency actually costs**: At `beam_width=10` and `n_levels=3`, retrieval scores `10 x 256 = 2,560` candidates per decoding level, `7,680` total across the full decode (Section 6) — real sequential compute the incumbent's sub-5ms ANN lookup never pays. This is the number the team weighs against the cold-start visibility win: a fixed-index lookup is faster per request, but it has zero coverage for the listings this migration exists to help. In this design the team keeps the incumbent tower as the latency-critical path for the bulk of traffic and reserves the generative path's added decode cost for the blended fraction of each response, so the aggregate p99 stays inside the original 8ms budget even though any single generative-path candidate costs more to produce.

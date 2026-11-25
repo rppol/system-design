@@ -814,6 +814,29 @@ A model that passed its four-fifths check at launch drifted out of compliance ei
 
 A team facing a failing four-fifths ratio reached for the fastest fix — an explicit per-group decision threshold in the serving path — without checking that conditioning an individual employment decision on protected-group membership can itself be read as disparate treatment in some jurisdictions. Fix: push the correction upstream into pre- or in-processing (Section 8.2) wherever the legal context makes an explicit per-decision group rule risky, and reserve post-processing for contexts (e.g., internal model debugging, or jurisdictions/domains where it is clearly permitted) where that risk does not apply.
 
+**Pitfall 4 as code: one accuracy number for everyone.**
+
+```python
+# BROKEN: aggregate accuracy only
+from sklearn.metrics import accuracy_score
+
+print(accuracy_score(y_true, y_pred))          # 0.91, and no way to see who carries the errors
+```
+
+```python
+# FIX: the same predictions, sliced by group, with error rates as well as accuracy
+from fairlearn.metrics import MetricFrame, false_negative_rate, false_positive_rate
+
+mf = MetricFrame(
+    metrics={"accuracy": accuracy_score, "fpr": false_positive_rate, "fnr": false_negative_rate},
+    y_true=y_true, y_pred=y_pred, sensitive_features=group,
+)
+print(mf.by_group)
+print(mf.difference(method="between_groups"))
+```
+
+A 0.91 overall accuracy can hide a group whose false-negative rate is twice the others', because the larger group dominates the average. The broken report is correct; it just cannot show the harm. `MetricFrame` computes every metric per group and the largest gap between groups, which is the number to put in the launch gate and the model card.
+
 ---
 
 ## 11. Technologies & Tools

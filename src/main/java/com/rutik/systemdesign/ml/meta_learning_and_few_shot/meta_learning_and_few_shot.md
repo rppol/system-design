@@ -644,6 +644,27 @@ Reptile's competitiveness with MAML despite computing no second derivative at al
 
 **Pitfall 5 — Scaling MAML's inner steps without expecting the memory cost.** A team raised `inner_steps` from 5 to 20 hoping a longer adaptation would close an accuracy gap, keeping `create_graph=True` (full second-order MAML) unchanged. The same batch size that fit comfortably before now hit out-of-memory, because full MAML's memory footprint holds the ENTIRE inner-loop computation graph alive until the outer backward pass, scaling roughly with inner steps times model size. Fix: switch to FOMAML (`create_graph=False`) or Reptile when scaling inner steps, or apply gradient checkpointing across the inner loop if the full second-order signal is genuinely required.
 
+**Pitfall 3 as code: BatchNorm statistics taken from the query batch.**
+
+```python
+# BROKEN: train mode at meta-test -- BatchNorm normalises with the query batch's statistics
+encoder.train()
+z_support, z_query = encoder(support), encoder(query)
+prototypes = z_support.view(n_way, k_shot, -1).mean(1)
+logits = -torch.cdist(z_query, prototypes)
+```
+
+```python
+# FIX: inductive evaluation -- running statistics, gradients off
+encoder.eval()
+with torch.no_grad():
+    z_support, z_query = encoder(support), encoder(query)
+prototypes = z_support.view(n_way, k_shot, -1).mean(1)
+logits = -torch.cdist(z_query, prototypes)
+```
+
+In train mode each query embedding depends on the other queries in the batch, so the model gets information about the test set's distribution that it would not have for one request at a time. Accuracy rises by a few points and is reported as a method improvement. Evaluating in eval mode, or comparing against a run that scores queries one at a time, exposes the gap.
+
 ---
 
 ## 11. Technologies & Tools
@@ -825,6 +846,34 @@ class FewShotCategoryRegistry:
 **Results (this deployment):** meta-validation accuracy on the held-out 2,000-category pool reached roughly 85% at 5-way 5-shot — higher than miniImageNet's benchmark number because catalog photos are far more homogeneous (consistent lighting, centered product, white background) than miniImageNet's varied natural scenes. Query classification latency stayed under 10ms per image with no retraining pipeline in the loop, and a new micro-category became queryable within the time it took to embed its five reference photos.
 
 **What went wrong first, and the fix:** the initial version registered categories using an off-the-shelf ImageNet-pretrained ResNet-18, without checking whether any of the 50,000 catalog categories overlapped ImageNet's 1,000 classes — some did (generic categories like "sneaker" or "wristwatch"). It also used a prototype cache keyed by an in-request batch index rather than the permanent category id. Both are the exact failure modes from Section 6 and Section 10, just wearing production clothes: the fix re-pretrained the encoder on catalog images only, and the registry above keys and guards the cache by permanent category id, rejecting any registration whose id collides with a meta-train category outright.
+
+**BROKEN → FIX: computing a prototype with the encoder in train mode.** The registry above sets `eval()` once in `__init__`; anything that later calls `encoder.train()` (a fine-tuning job sharing the object, a test harness) silently breaks registration.
+
+```python
+import torch
+from torch import Tensor, nn
+
+
+# BROKEN: BatchNorm in train mode while embedding 5 photos of ONE category
+def register_broken(encoder: nn.Module, support_images: Tensor) -> Tensor:
+    encoder.train()
+    z = encoder(support_images)    # each BatchNorm layer subtracts the mean of THESE 5 images
+    return z.mean(dim=0)           # the class-specific signal is normalised away, and running stats are overwritten
+```
+
+```python
+# FIX: force inference behaviour for the duration of the call, then restore the caller's mode
+@torch.inference_mode()
+def embed(encoder: nn.Module, images: Tensor) -> Tensor:
+    was_training = encoder.training
+    encoder.eval()                 # BatchNorm uses the running statistics learned in meta-training
+    try:
+        return encoder(images)
+    finally:
+        encoder.train(was_training)
+```
+
+In train mode a Conv-4 or ResNet-12 BatchNorm layer normalises with the batch statistics, and a support batch of five images of one micro-category has, by construction, that category's mean: subtracting it pushes every new prototype toward the same point, so nearest-prototype routing degrades toward chance without any error. It also updates the running statistics with single-class batches, corrupting the encoder for every later call. `inference_mode` additionally skips autograd bookkeeping on the serving path.
 
 ---
 

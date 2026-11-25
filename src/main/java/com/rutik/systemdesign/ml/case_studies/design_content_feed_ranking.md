@@ -95,7 +95,7 @@ flowchart LR
     fstore[("Feature Store\nonline Redis / offline Hive")]
     mtrain["MMOE Training\nPyTorch 4xA100, 6h/week"]
     reg["Model Registry\nMLflow"]
-    serve(["TorchServe"])
+    serve(["Triton Inference Server\nONNX / TensorRT MMOE"])
 
     act --> kafka --> flink --> fstore --> mtrain --> reg --> serve
 
@@ -105,7 +105,7 @@ flowchart LR
     class reg base
 ```
 
-Offline training pipeline: engagement events stream through Kafka and Flink into the feature store, and the weekly MMOE retrain is promoted through the MLflow registry to TorchServe.
+Offline training pipeline: engagement events stream through Kafka and Flink into the feature store, and the weekly MMOE retrain is promoted through the MLflow registry, exported to ONNX, and served by NVIDIA Triton Inference Server, whose dynamic batcher merges the ~800-candidate stage-2 scoring calls from many feed requests into GPU-sized batches.
 
 ---
 
@@ -563,7 +563,7 @@ def ips_corrected_label(
 | Kafka | User action event stream (clicks, likes, dwells) | 16 partitions, 7-day retention |
 | Flink | Training label construction (join actions with impressions) | 48h join window |
 | Redis | Feature store online serving (user embeddings) | 5-min TTL, <5ms read |
-| TorchServe | MMOE model serving | dynamic batching, 4xA100 GPU |
+| Triton Inference Server | MMOE model serving (ONNX Runtime or TensorRT backend) | `dynamic_batching` with a small `max_queue_delay_microseconds`, 4xA100 GPU |
 
 ---
 

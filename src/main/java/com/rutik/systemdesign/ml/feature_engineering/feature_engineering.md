@@ -38,6 +38,18 @@ Key insight: data leakage is the most dangerous feature engineering mistake — 
 4. **Missing values carry signal**: always consider adding a binary `feature_was_missing` indicator before imputing; the fact that a value is absent is often informative (e.g., "no prior purchase" vs "purchase amount unknown").
 5. **Feature selection is regularization**: irrelevant features add noise, inflate computation, and can cause multicollinearity. Select aggressively, then add back if model performance drops.
 
+**Principle 3 in numbers — smoothing a target encoding.** Replacing a high-cardinality category by its mean target is compact, but a raw mean over few rows is noise. The standard fix shrinks each category toward the global mean:
+
+```
+encoding(c) = (n_c x mean_c + m x global_mean) / (n_c + m)
+
+global fraud rate 0.10, smoothing weight m = 20
+category with n = 5 rows, raw mean 0.80:   (5 x 0.80 + 20 x 0.10) / 25 = (4 + 2) / 25 = 0.24
+category with n = 5,000 rows, raw mean 0.80: (4,000 + 2) / 5,020 = 0.797
+```
+
+A category seen 5 times keeps only a fifth of its raw signal, one seen 5,000 times keeps almost all of it, so `m` is the number of rows at which a category's own mean and the global mean get equal weight. Smoothing fixes the variance, not the leak in principle 1: the encoding must still be computed out of fold for training rows (scikit-learn's `TargetEncoder.fit_transform` cross-fits and also chooses the shrinkage by empirical Bayes when `smooth="auto"`).
+
 ---
 
 ## 4. Types / Architectures / Strategies

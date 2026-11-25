@@ -746,6 +746,27 @@ def popularity_fallback(
 
 **Pitfall 5 — Not parallelizing ALS user/item updates**: ALS was run serially (one user at a time on a single core). 5M users x 128 factors x 15 iterations took 18 hours. Fix: the user updates are fully independent — distribute across Spark workers. With 200 cores, same job runs in ~7 minutes. The `implicit` library's ALS implementation handles this automatically with Cython/GPU acceleration.
 
+**Pitfall 2 as code: recommending what the user already has.**
+
+```python
+# BROKEN: top-N over raw scores
+import numpy as np
+
+scores = user_factors[u] @ item_factors.T
+top = np.argsort(-scores)[:10]
+```
+
+```python
+# FIX: mask the user's history before ranking
+scores = user_factors[u] @ item_factors.T
+seen = user_items[u].indices                     # CSR row: item ids the user interacted with
+scores[seen] = -np.inf
+top = np.argpartition(-scores, 10)[:10]
+top = top[np.argsort(-scores[top])]
+```
+
+Items the user already interacted with have the highest scores by construction, so the broken list is dominated by them and offline metrics computed on the training interactions look excellent. In production the user sees what they already bought. Masking `seen` costs one indexed write per request; libraries such as `implicit` do it by default, which is why the bug appears in hand-written serving code.
+
 ---
 
 ## 11. Technologies & Tools
@@ -920,3 +941,35 @@ RESULTS after 4 weeks:
 ```
 
 The key lesson: the log transformation of listen duration was more impactful than the choice of hyperparameters. A user who listened to 100% of a 1-hour episode should have slightly more signal than one who listened to 100% of a 3-minute episode — the log normalization captures this without letting episode length dominate the confidence weighting.
+
+**BROKEN → FIX: tutorial-era `implicit` code on a current release.** The ALS step above is usually written with the `implicit` library, whose input orientation changed.
+
+```python
+import implicit
+import numpy as np
+import scipy.sparse as sp
+
+# r: log(1 + listen fraction) per event; user_idx / show_idx: integer ids
+
+
+# BROKEN: an items x users matrix, and the confidence scaling applied twice
+item_users = sp.csr_matrix((40.0 * r, (show_idx, user_idx)), shape=(n_shows, n_users))
+model = implicit.als.AlternatingLeastSquares(factors=128, regularization=0.01, alpha=40.0, iterations=15)
+model.fit(item_users)
+# since implicit v0.5.0, fit() takes a USERS x items matrix: model.user_factors now holds
+# 300K show vectors and item_factors 8M user vectors; and r was already multiplied by 40
+# before alpha=40 was applied again
+```
+
+```python
+# FIX: users x items, raw confidence values, alpha applied once by the library
+user_items = sp.csr_matrix((r, (user_idx, show_idx)), shape=(n_users, n_shows))
+model = implicit.als.AlternatingLeastSquares(factors=128, regularization=0.01, alpha=40.0,
+                                             iterations=15, random_state=42)
+model.fit(user_items)
+assert model.user_factors.shape == (n_users, 128)
+
+ids, scores = model.recommend(user_id, user_items[user_id], N=20, filter_already_liked_items=True)
+```
+
+The `implicit` changelog for v0.5.0 reads "Change model.fit to take a user_items sparse matrix", so code copied from older posts trains without error and produces nonsense recommendations; the shape assertion turns that into a failure on day one. `filter_already_liked_items=True` replaces the separate "filter listened shows" Redis lookup for offline evaluation, but serving still needs the Redis set because listens arrive between nightly runs.

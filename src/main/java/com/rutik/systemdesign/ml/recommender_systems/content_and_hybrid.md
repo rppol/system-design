@@ -751,6 +751,24 @@ The `0.75%` looks negligible until you notice which documents it contains: the n
 
 **Pitfall 5 — LightGCN over-smoothing with too many layers**: A team increased LightGCN from 3 to 6 layers to capture longer-range graph structure. NDCG@10 dropped from 0.31 to 0.24. Root cause: over-smoothing — with many propagation layers, all user and item embeddings converge to similar vectors (graph Laplacian smoothing destroys local structure). Fix: 2-4 layers is optimal for most recommendation graphs; validate with offline NDCG before increasing layers; apply dropout on graph adjacency (DropEdge) to prevent over-smoothing.
 
+**Pitfall 3 as code: a user profile with no memory decay.**
+
+```python
+# BROKEN: the profile is the plain mean of everything the user ever engaged with
+profile = item_vecs[history_ids].mean(axis=0)
+```
+
+```python
+# FIX: exponential time decay with a 30-day half-life
+import numpy as np
+
+age_days = (now - history_ts) / np.timedelta64(1, "D")
+w = 0.5 ** (age_days / 30.0)
+profile = (w[:, None] * item_vecs[history_ids]).sum(axis=0) / w.sum()
+```
+
+With a plain mean, a user with 400 old interactions and 10 new ones has a profile that is 97.6% old taste, so a change of interest takes months to show. Nothing is wrong numerically. A half-life makes recent behaviour count more in a controlled way; pick the half-life with an offline replay on next-item prediction rather than by intuition.
+
 ---
 
 ## 11. Technologies & Tools
@@ -920,3 +938,34 @@ RESULTS after 2 months:
   Cross-practice-area discovery: +22% (attorneys finding relevant precedent outside primary area)
   Cold-start document recall@20: 71% (vs. 0% with pure CF)
 ```
+
+**BROKEN → FIX: concatenating a 100K-dimensional TF-IDF row with a 384-dimensional SBERT vector.**
+The item vector above, taken literally, cannot be stored and has no designed weighting.
+
+```python
+import numpy as np
+
+# BROKEN: dense concat of the raw blocks
+item_vec = np.hstack([tfidf_matrix.toarray(), sbert_emb]).astype(np.float32)   # 100,384 dims
+# 20M documents x 100,384 dims x 4 bytes = 8.0 TB for one FAISS IVFFlat index, and each block
+# enters the cosine with whatever norm it happens to have, so the lexical/semantic balance is an accident
+```
+
+```python
+from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import normalize
+
+# FIX: reduce TF-IDF, unit-normalise each block, weight the blocks on purpose
+svd = TruncatedSVD(n_components=256, random_state=42).fit(tfidf_sample)   # fit on a ~1M-doc sample
+lex = normalize(svd.transform(tfidf_matrix))          # (n, 256), unit rows
+sem = normalize(sbert_emb)                            # (n, 384), unit rows
+w_lex, w_sem = 0.4, 0.6                               # tuned offline on judged attorney queries
+item_vec = np.hstack([np.sqrt(w_lex) * lex, np.sqrt(w_sem) * sem]).astype(np.float32)
+# 20M x 640 x 4 bytes = 51 GB
+```
+
+Because both blocks are unit vectors scaled by the square roots of weights that sum to 1, every
+concatenated vector is itself a unit vector and the inner product of two of them is exactly
+`w_lex * cos_lex + w_sem * cos_sem`: the hybrid weight becomes a tunable number instead of a side effect
+of the vectorisers. Build the user profile vector from the same transformed blocks, and refit the SVD when
+the vocabulary drifts, because new documents are projected with the old components.

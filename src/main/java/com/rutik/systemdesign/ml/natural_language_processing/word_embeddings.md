@@ -1070,8 +1070,8 @@ It damps the influence of very frequent co-occurrences and zeroes out empty cell
 dominating the least-squares objective while still giving them nonzero weight. Without it, common-word
 co-occurrences would swamp the informative rare-pair signal.
 
-**Q: How does fastText handle out-of-vocabulary words?**
-**Short:** fastText handles OOV words by summing the vectors of a word's character n-grams, also capturing morphology.
+**Q: Why does fastText still produce a vector for a typo or unseen inflection, and what does that cost?**
+**Short:** It sums the vectors of the word's character 3-6-grams, so unseen forms share known pieces; the price is a larger model for the n-gram buckets and noisier vectors for very short words.
 
 It represents each word as the sum of its character n-gram vectors (typically 3–6 chars), so an unseen word
 still gets a vector by summing whatever known n-grams it contains. This also captures morphology — "running",
@@ -1260,3 +1260,42 @@ DeBERTa. Blended Macro-F1 **0.85** at **~1/5** the average serving cost of DeBER
   handling the easy majority, reserving the transformer for the ambiguous tail. Cross-links:
   [feature_engineering](../feature_engineering/feature_engineering.md),
   [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md).
+
+**BROKEN → FIX: filling GloVe's gaps with raw fastText vectors.** The hybrid init in Phase 4 mixes two
+independently trained 300-dimensional spaces, and their axes mean nothing to each other.
+
+```python
+import numpy as np
+
+
+# BROKEN: GloVe where available, fastText otherwise, no alignment
+def hybrid_broken(vocab: list[str], glove: dict[str, np.ndarray], ft) -> np.ndarray:
+    return np.stack([glove[w] if w in glove else ft.wv[w] for w in vocab])
+# "chargeback" (fastText) lands at an arbitrary spot relative to "refund" (GloVe): dimension 17
+# of one space and dimension 17 of the other are unrelated directions
+```
+
+```python
+from scipy.linalg import orthogonal_procrustes
+
+
+# FIX: learn the rotation that maps fastText onto GloVe using the words both spaces know
+def hybrid_aligned(vocab: list[str], glove: dict[str, np.ndarray], ft) -> np.ndarray:
+    def unit(m: np.ndarray) -> np.ndarray:
+        return m / np.linalg.norm(m, axis=-1, keepdims=True)
+
+    shared = [w for w in vocab if w in glove]                  # the 71% GloVe covers: anchors
+    src = unit(np.stack([ft.wv[w] for w in shared]))
+    dst = unit(np.stack([glove[w] for w in shared]))
+    rot, _ = orthogonal_procrustes(src, dst)                   # argmin ||src @ R - dst||, R orthogonal
+    glove_norm = float(np.linalg.norm(np.stack([glove[w] for w in shared]), axis=1).mean())
+    return np.stack([glove[w] if w in glove else glove_norm * (unit(ft.wv[w]) @ rot)
+                     for w in vocab])
+```
+
+An orthogonal map preserves every distance and angle inside the fastText space, so the domain
+neighbourhoods ("chargeback" near "dispute" and "reversal") survive while the whole space is rotated into
+GloVe's coordinates, and the rescale puts the filled-in vectors at GloVe's typical norm. Fine-tuning can
+partly repair an unaligned init, but with 8,000 labels and a 1e-4 embedding learning rate it starts the
+29% jargon rows from noise relative to the rest; check the alignment by testing whether a held-out shared
+word's rotated fastText vector has its GloVe vector among its nearest neighbours.

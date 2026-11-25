@@ -1050,6 +1050,26 @@ survive an A/B test because the downstream ranker was trained on the old candida
 are written up with their incidents and fixes in
 **[Generative Recommenders](generative_recommenders.md)**, Section 10.
 
+**Pitfall 1 as code: in-batch negatives without sampling-bias correction.**
+
+```python
+# BROKEN: popular items appear as negatives far more often than their share of the catalogue
+import torch
+import torch.nn.functional as F
+
+logits = user_emb @ item_emb.T / tau                          # [B, B]
+loss = F.cross_entropy(logits, torch.arange(logits.size(0), device=logits.device))
+```
+
+```python
+# FIX: logQ correction -- subtract each in-batch item's log sampling probability
+log_q = torch.log(item_freq[item_ids] / item_freq.sum())       # streaming estimate in production
+logits = user_emb @ item_emb.T / tau - log_q[None, :]
+loss = F.cross_entropy(logits, torch.arange(logits.size(0), device=logits.device))
+```
+
+An item that appears in 1% of batches is used as a negative for every other user in those batches, so the model learns to push popular items down. Recall on head items drops and nothing in the loss explains it. The logQ correction (Yi et al., RecSys 2019) removes the sampling probability from the logits, so the softmax approximates the full-catalogue one again.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1236,3 +1256,32 @@ flowchart LR
 - NDCG@10 (ranking stage): +11% improvement
 - New video cold-start CTR: +34% — content features allow immediate representation
 - Latency p99: 18ms end-to-end (within 20ms budget)
+
+**BROKEN → FIX: in-batch negatives with no popularity correction.** The 20 in-batch negatives per positive are not a uniform sample of the catalog: a video appears in a batch in proportion to how often it is watched.
+
+```python
+import torch
+import torch.nn.functional as F
+
+
+# BROKEN: plain in-batch softmax
+def inbatch_loss(u: torch.Tensor, v: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+    """u, v: (B, 256), already L2-normalised; row i of v is the positive for row i of u."""
+    logits = (u @ v.T) / temperature
+    labels = torch.arange(u.size(0), device=u.device)
+    return F.cross_entropy(logits, labels)
+# popular videos show up as negatives in many rows of every batch, niche ones almost never,
+# so the model learns to push popular items down for everyone
+```
+
+```python
+# FIX: logQ correction, subtract the log probability that each item was sampled
+def inbatch_loss_logq(u: torch.Tensor, v: torch.Tensor, item_log_q: torch.Tensor,
+                      temperature: float = 0.07) -> torch.Tensor:
+    """item_log_q[j]: log of item j's share of training events (its in-batch sampling probability)."""
+    logits = (u @ v.T) / temperature - item_log_q[None, :]
+    labels = torch.arange(u.size(0), device=u.device)
+    return F.cross_entropy(logits, labels)
+```
+
+This is the sampling-bias correction of Yi et al., "Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations" (RecSys 2019): with the log-frequency term removed from each column, the softmax approximates a full-catalog softmax instead of one tilted against the head. Apply it only in training; at serving the ANN index scores raw `u @ v`. Estimate the frequencies from the same 90-day event window the batches are drawn from, or with a streaming counter if the catalog turns over quickly.

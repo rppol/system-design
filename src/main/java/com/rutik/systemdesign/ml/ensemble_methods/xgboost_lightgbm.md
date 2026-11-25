@@ -1268,3 +1268,20 @@ print(f"1000-sample batch: {batch_time:.2f}ms")
 - Rollback: if live CTR (1-hour rolling) drops > 3% vs previous model, automatic rollback
 
 **Outcome (illustrative)**: +0.018 AUC over the previous XGBoost model (0.793 vs 0.775 — 1.8 percentage points, a 2.3% relative gain), which at this traffic volume would plausibly translate into a sub-1% CTR lift and a seven-figure annualised revenue delta. The revenue figure is a modelled consequence of the AUC delta, not a measured result. Training time reduction (45s vs 135s) enabled 3 model versions per day (morning/afternoon/evening traffic pattern adaptation), a capability not feasible with XGBoost.
+
+**BROKEN → FIX: `subsample` without `subsample_freq` in LightGBM.** The params dict above carries a silent no-op.
+
+```python
+# BROKEN: row subsampling requested, never performed
+params = {"objective": "binary", "subsample": 0.8, "colsample_bytree": 0.8}   # plus the keys above
+# subsample is an alias of bagging_fraction; LightGBM only bags when bagging_freq
+# (alias subsample_freq) is above 0, and its default is 0 — every tree sees 100% of rows
+```
+
+```python
+# FIX: turn bagging on explicitly
+params = {"objective": "binary", "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.8}
+# subsample_freq=1: draw a fresh 80% row sample before every iteration
+```
+
+LightGBM's parameter reference states it directly: "to enable bagging, `bagging_freq` should be set to a non zero value as well". No warning is raised, so the regularisation the team believed it had tuned was absent. XGBoost's `subsample` needs no such flag, which is exactly why this bug appears when a param dict is ported from XGBoost to LightGBM. `colsample_bytree` (alias `feature_fraction`) has no frequency switch and was working all along.

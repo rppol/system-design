@@ -1,5 +1,7 @@
 # Offline Reinforcement Learning
 
+> Papers, library features and benchmark numbers on this page were checked against arXiv, the IQL paper's Table 1 and the Pearl, D4RL and Minari repositories on 2026-11-25.
+
 ---
 
 ## 1. Concept Overview
@@ -30,6 +32,31 @@ Key insight: in the online loop, a bad estimate corrects itself — the agent tr
 4. **The whole field is a spectrum of "how hard do you constrain the policy to the data."** Pure behavior cloning constrains completely (and cannot improve on the data). Unconstrained off-policy Q-learning constrains not at all (and diverges, per above). Every practical algorithm sits between these: stay close enough to the data that extrapolation error can't run away, while still improving on the average behavior in the logs.
 5. **Offline RL is not the same problem as off-policy evaluation, but they share the same disease.** Training a policy from logs and *scoring* a policy from logs (§6) both fail for the same underlying reason: neither can check its answer against a real environment, so both need a way to know when the data does and does not support a conclusion.
 6. **The logging requirement decides whether any of this is even possible.** You must record the *propensity* — the probability the behavior policy actually assigned to the action it took, `P_b(a|s)` — at decision time. Without it, you cannot compute an importance-sampling correction, you cannot build an unbiased off-policy estimate, and a deterministic production policy with zero randomization produces logs from which nothing can be learned or safely evaluated at all. This is the most common way real offline RL projects fail, and it fails at the logging layer, months before anyone runs CQL.
+7. **Coverage is measured, not assumed.** An action is "supported" at a state only if `P_b(a|s) > 0` and the log holds enough rows of it to fit a value. The quantity that bounds every guarantee in this field is a ratio of the learned policy's state-action distribution to the logged one (the *concentrability coefficient*): when the learned policy puts mass where the log has almost none, that ratio blows up, and so does any error bound built on it. In practice you audit it directly, as a count of logged rows per `(state bucket, action)` cell.
+8. **Pessimism is the shared design rule.** When an estimate cannot be checked, act as if it is lower than it looks. CQL builds pessimism into the Q-function, policy-constraint methods build it into the action set, and IQL builds it into what the target is allowed to query. Online RL uses the opposite rule (optimism in the face of uncertainty) because exploration will test the optimistic guess; offline, nothing will.
+
+### Worked example: why `max` over noisy guesses is biased upward
+
+Take one state with three actions whose true values are all 0, and suppose the Q-network's error at each is independent Gaussian noise with standard deviation `sigma = 1`. The TD target uses `max_a Q(s, a)`. The expected maximum of three independent standard normals is about `0.85`, so the target is inflated by `0.85 sigma` even though every true value is 0. Bootstrapping then copies that inflation one step back each iteration, discounted by `gamma = 0.95`, so a state `k` steps upstream inherits roughly `0.95^k x 0.85`, plus its own new maximization bias. Online, the agent would try the inflated action and the environment would cancel the error. Offline, the inflation stays.
+
+```python
+import numpy as np
+
+
+def max_bias(n_actions: int, sigma: float = 1.0, n_trials: int = 200_000, seed: int = 0) -> float:
+    """Expected value of max_a Q(s, a) when every true Q is 0 and errors are N(0, sigma^2)."""
+    rng = np.random.default_rng(seed)
+    noisy_q = rng.normal(0.0, sigma, size=(n_trials, n_actions))
+    return float(noisy_q.max(axis=1).mean())
+
+
+if __name__ == "__main__":
+    for k in (1, 3, 10, 100):
+        print(k, round(max_bias(k), 3))
+    # exact expected maxima: 0.0, 0.846, 1.539, 2.508; the simulation lands within 0.01
+```
+
+The bias grows with the number of actions: 0.85 sigma for 3 actions, 1.54 sigma for 10, 2.51 sigma for 100. A pricing grid with 100 price points therefore starts with a built-in overestimate of about 2.5 standard deviations of the Q-network's error at every under-sampled state, which is why continuous or large discrete action spaces are where unconstrained offline Q-learning fails first.
 
 ---
 
@@ -137,6 +164,8 @@ import torch.nn as nn
 import torch.optim as optim
 
 N_STATES, N_ACTIONS, GAMMA = 5, 3, 0.95  # actions: 0=forward, 1=stay, 2=back
+np.random.seed(0)
+torch.manual_seed(0)
 
 def env_step(s: int, a: int) -> tuple[int, float, bool]:
     s2 = min(s + 1, N_STATES - 1) if a == 0 else s if a == 1 else max(s - 1, 0)
@@ -189,9 +218,17 @@ def train_cql(alpha_cql: float, n_epochs: int = 400) -> QNet:
 
 q_unconstrained = train_cql(alpha_cql=0.0)
 q_cql = train_cql(alpha_cql=1.0)
+
+counts = torch.bincount(logged_a, minlength=N_ACTIONS).tolist()
+print(f"Logged transitions: {N_LOGGED}")
+print(f"Action counts in logs -- forward: {counts[0]}, stay: {counts[1]}, back: {counts[2]}")
+with torch.no_grad():
+    s0 = torch.tensor([0])
+    print("plain Q-learning (alpha=0):", q_unconstrained(s0).numpy().round(2))
+    print("CQL (alpha=1.0):           ", q_cql(s0).numpy().round(2))
 ```
 
-**Actual output** (seed fixed, `torch==2.13.0`, `numpy==2.4.4`, CPU):
+**Representative output** (one seeded CPU run; the exact digits move with the PyTorch and NumPy versions, the shape of the result does not):
 
 ```
 Logged transitions: 6000
@@ -201,6 +238,17 @@ Q(s=0, .) after training [forward, stay, back] -- 'back' has 5% log coverage:
   plain Q-learning (alpha=0): [ 8.26 -0.10 -0.08]
   CQL (alpha=1.0):            [ 2.01  0.76  0.03]
 ```
+
+**Check the 8.26 by hand.** The best path from state 0 is four "forward" steps: three steps
+at `-0.1` and the goal step at `+10`. Its discounted value is
+`-0.1 - 0.95 x 0.1 - 0.95^2 x 0.1 + 0.95^3 x 10 = -0.1 - 0.095 - 0.090 + 8.574 = 8.29`, so the
+network found the true optimal `Q(0, forward)` to within 0.03. The `-0.10` for "stay" is not a
+true value. The target network is synced every 100 epochs, so 400 epochs give four Bellman
+backups, exactly enough to carry the goal reward four steps back to `Q(0, forward)`. The true
+`Q(0, stay) = -0.1 + 0.95 x 8.29 = 7.78` needs one more backup, because its target is the
+converged `Q(0, forward)`. So the run is also a warning: a Q-table read before value iteration
+has converged looks like a confident verdict ("stay is worthless") and is only an artifact of
+the training schedule.
 
 The alpha=0 run is ordinary off-policy Q-learning on the logs and recovers a large, roughly correct value for "forward" — but this is exactly the setting where extrapolation error is a live risk (compare §5's spike: nothing here would have flagged a spurious estimate as spurious). CQL compresses every value, including the well-supported one, toward a smaller number — visible proof of the paper's central claim: the CQL Q-function is a deliberately **conservative lower bound**, not a best-effort point estimate, and that conservatism is the price paid for the safety guarantee.
 
@@ -244,9 +292,12 @@ def train_iql(tau: float = 0.8, n_epochs: int = 400) -> tuple[QNet, VNet]:
     return q, v
 
 q_iql, v_iql = train_iql(tau=0.8)
+with torch.no_grad():
+    print("IQL V(s) estimates, s=0..4:", v_iql(torch.arange(N_STATES)).numpy().round(2))
+    print("IQL Q(s=0, .) [forward, stay, back]:", q_iql(torch.tensor([0])).numpy().round(2))
 ```
 
-**Actual output:**
+**Representative output:**
 
 ```
 IQL V(s) estimates, s=0..4: [-0.01  1.16  4.56  8.61  1.87]
@@ -273,19 +324,32 @@ def evaluate_candidate_policy() -> None:
     # Unbiased if EITHER q_cql or the propensities are correct -- "doubly" robust.
     dr_terms = v_hat_candidate + weights * (logged_r - q_hat_taken)
     dr_estimate = dr_terms.mean().item()
-    print(f"IPS estimate: {ips_estimate:.3f}  (var {(weights * logged_r).var().item():.3f})")
-    print(f"DR estimate:  {dr_estimate:.3f}  (var {dr_terms.var().item():.3f})")
+    support = (logged_a == 0).float().mean().item()
+    print(f"Candidate policy = 'always forward' (a=0); logged support for a=0: {support:.1%} of rows")
+    print(f"IPS estimate:  {ips_estimate:.3f}  (variance: {(weights * logged_r).var().item():.3f})")
+    print(f"DR estimate:   {dr_estimate:.3f}  (variance: {dr_terms.var().item():.3f})")
 
 evaluate_candidate_policy()
 ```
 
-**Actual output:**
+**Representative output:**
 
 ```
 Candidate policy = 'always forward' (a=0); logged support for a=0: 20.4% of rows
 IPS estimate:  2.734  (variance: 132.998)
 DR estimate:   2.486  (variance: 105.408)
 ```
+
+**Know the true answer before trusting either number.** This is a one-step estimate of the
+expected *immediate* reward under "always forward", over logged start states drawn uniformly
+from 0-3. Only state 3 pays `+10` for "forward"; the other three pay `-0.1`. The true value is
+therefore `0.25 x 10 + 0.75 x (-0.1) = 2.425`. DR lands 0.06 away from it, IPS 0.31 away, which
+matches the variance ordering. The same check also predicts the IPS variance: each "forward"
+row carries weight `1 / 0.2 = 5`, so a state-3 row contributes `50` and the others `-0.5`, and
+`0.2 x (0.25 x 2500 + 0.75 x 0.25) - 2.425^2 = 125.0 - 5.9 = 119`, close to the sampled 133.
+Build a toy check like this into any OPE pipeline: a synthetic policy whose value you can
+compute exactly is the only way to see estimator bias, because real logs never tell you the
+truth.
 
 Both estimators only use the 20.4% of logged rows where the behavior policy happened to also play "forward" — every other row contributes zero to IPS and only its direct-method term to DR. That's already a 21% variance reduction from the same logs, from a single Q-function used purely as a control variate; the two estimators agree to within 10% of each other, which is the everyday sanity check for "does the direct-method component look consistent with the data."
 
@@ -304,7 +368,7 @@ def ess_vs_horizon(horizons: list[int], n_traj: int = 20_000, ratio_std: float =
 ess_vs_horizon([1, 5, 10, 20, 50, 100])
 ```
 
-**Actual output** (of 20,000 simulated logged trajectories):
+**Output** (of 20,000 simulated logged trajectories, `default_rng(1)`):
 
 ```
 H=  1  mean(W)=0.994  var(W)=0.247   ESS=16003.2  ESS/N=0.8002
@@ -315,15 +379,19 @@ H= 50  mean(W)=0.842  var(W)=389.234 ESS=   36.4  ESS/N=0.0018
 H=100  mean(W)=0.282  var(W)=148.697 ESS=   10.7  ESS/N=0.0005
 ```
 
-At `H=1`, 20,000 logged trajectories are worth 16,003 real samples — a mild, tolerable loss. By `H=100`, the same 20,000 trajectories are worth **10.7** — the entire batch's estimate is effectively decided by a handful of trajectories whose cumulative importance weight happened not to collapse toward zero. This is the concrete reason plain importance sampling is treated as unusable past a horizon of roughly 10-20 steps in practice, and why doubly robust and model-based (fitted-Q evaluation) estimators dominate long-horizon OPE — they don't eliminate the horizon problem, but the direct-method term keeps contributing even where the IS weight has collapsed to noise.
+At `H=1`, 20,000 logged trajectories are worth 16,003 real samples — a mild, tolerable loss. By `H=100`, the same 20,000 trajectories are worth **10.7** — the entire batch's estimate is effectively decided by a handful of trajectories whose cumulative importance weight happened not to collapse toward zero.
+
+**The closed form behind the table.** Each per-step ratio has mean 1 and variance `0.5^2 = 0.25`, so its second moment is `1.25`. The product of `H` independent ratios has second moment `1.25^H`, and the effective sample size fraction is about `E[W]^2 / E[W^2] = 1.25^-H`. That gives 0.80 at `H=1`, 0.33 at `H=5`, 0.11 at `H=10` and 0.012 at `H=20`, the same collapse the simulation shows. From `H=10` on, the sampled ESS sits *above* the formula (0.031 against 0.012 at `H=20`, 0.0018 against 1.4e-5 at `H=50`), and the sampled `mean(W)` falls below 1: 20,000 draws no longer reach the rare huge weights that carry the true mean, so the sample understates the variance. That is the worst property of long-horizon IS: the estimate looks calmer than it is exactly when it is least reliable. To keep ESS above 10% of the batch, solve `1.25^-H >= 0.1`, which gives `H <= 10`.
+
+This is the concrete reason plain importance sampling is treated as unusable past a horizon of roughly 10-20 steps in practice, and why doubly robust and model-based (fitted-Q evaluation) estimators dominate long-horizon OPE — they don't eliminate the horizon problem, but the direct-method term keeps contributing even where the IS weight has collapsed to noise.
 
 ---
 
 ## 7. Real-World Examples
 
-**Meta's Pearl (production RL library).** Pearl ([arXiv:2312.03814](https://arxiv.org/abs/2312.03814), Meta's Applied Reinforcement Learning team) is deployed in production and ships CQL, IQL, and TD3+BC as first-class offline RL algorithms alongside its online actor-critic and bandit modules (already listed in [`reinforcement_learning.md` §11](reinforcement_learning.md)). The existence of a production library that treats offline RL as a peer of online RL and bandits — not an academic afterthought — is itself the strongest signal of how the industry actually consumes RL: mostly from logs, rarely from a live loop.
+**Meta's Pearl (production-ready RL library).** Pearl ([arXiv:2312.03814](https://arxiv.org/abs/2312.03814), Meta's Applied Reinforcement Learning team) ships offline RL as a first-class feature beside its online actor-critic and bandit modules (already listed in [`reinforcement_learning.md` §11](reinforcement_learning.md)): `ImplicitQLearning` for IQL, a `TD3BC` policy learner, and CQL as a flag on its deep Q-learner (`DeepQLearning(is_conservative=True, conservative_alpha=2.0)`). Its README lists recommender systems, auction bidding and creative selection as the real-world applications it is being adopted for. A library that puts offline RL next to bandits, rather than in a research appendix, reflects how industry mostly consumes RL: from logs, rarely from a live loop.
 
-**Industrial process control.** Offline RL (CQL specifically) has been applied to real manufacturing lines where online exploration is either unsafe or prohibitively expensive to simulate accurately — a steel-industry process-control case study and a press-hardening (automotive stamping) case study both selected CQL for its conservative, overestimation-resistant value function over methods requiring live interaction. These are outside this file's recsys/pricing/marketplace focus but make the general point concretely: offline RL is chosen specifically *because* the environment cannot be safely explored, the same reasoning that applies to pricing a real customer or dispatching a real driver.
+**Benchmarks that look like production logs.** D4RL ([arXiv:2004.07219](https://arxiv.org/abs/2004.07219)) built datasets from mixtures of policies of varying quality, which is what production logs look like. Its AntMaze tasks are the clearest real-world proxy for "the log has no single good trajectory, only good pieces": an ant robot must reach a goal by recombining segments of undirected, mediocre runs. The IQL paper's Table 1 (Kostrikov et al., [arXiv:2110.06169](https://arxiv.org/abs/2110.06169)) shows how sharply method choice matters there. On `antmaze-medium-play`, behavior cloning and Decision Transformer both score 0.0, TD3+BC 10.6, CQL 61.2 and IQL 71.2; on `antmaze-large-diverse`, CQL scores 14.9 and IQL 47.5. On the nine locomotion datasets, where logs contain whole good trajectories, DT, TD3+BC, CQL and IQL total between 672.6 and 698.5, within 4% of each other. The lesson transfers to pricing and dispatch: if no logged policy was good end to end, you need a method that stitches.
 
 **Slate recommendation — logging, not just training.** [`reinforcement_learning.md` §7](reinforcement_learning.md) already covers YouTube's production REINFORCE recommender (Chen et al., WSDM 2019) and its off-policy correction; that system is continually retraining against fresh logs rather than training once from a frozen dataset, so it sits adjacent to — not squarely inside — the offline RL setting described here. The distinction matters in an interview: "off-policy" (learns from data collected by a different policy) and "offline" (learns from a dataset with zero further collection) are not synonyms, and a system can be the former without being the latter.
 
@@ -349,6 +417,28 @@ All three share the same credit-assignment shape: the reward that matters (reten
 | IQL | Moderate; benefits from reasonably diverse logged actions per state | Moderate — expectile `tau` controls how aggressively it estimates the best in-sample action | Yes, and typically the most robust of the value-based family — never touches an OOD action to begin with | Standard OPE |
 | Decision Transformer | Large; sequence models want more data than tabular-scale value methods | High — target return-to-go must be chosen at inference time, and generalizes poorly outside the logged return range | **No** — known to struggle at combining pieces of different sub-optimal trajectories into a better one (§12) | Awkward — no explicit value function to plug into DR; typically evaluated by rollout in a simulator or by DM models built on top |
 | Contextual bandit (for comparison) | Smallest — one-step, no bootstrapping | Low | N/A — no multi-step credit assignment exists | Easiest of all: single-step IPS/DR, no horizon-collapse problem (§6) |
+
+### Measured cost of choosing wrong (IQL paper, Table 1, D4RL normalized scores)
+
+| Method | Locomotion total (9 datasets) | AntMaze total (6 datasets) | Reported runtime |
+|--------|-------------------------------|----------------------------|------------------|
+| BC | 466.7 | 100.2 | 10 min |
+| Decision Transformer | 672.6 | 112.2 | 960 min |
+| TD3+BC | 677.4 | 163.8 | 20 min |
+| CQL | 698.5 | 303.6 | 80 min |
+| IQL | 692.4 | 378.0 | 20 min |
+
+Read the two columns together. On locomotion the four non-BC methods are within 4% of each other, so the cheapest one to train and tune wins. On AntMaze, which needs stitching, IQL scores 3.4x Decision Transformer and 1.25x CQL, at a quarter of CQL's runtime and a forty-eighth of DT's. Run your own version of this table on a slice of your logs before you commit to a method: the ranking depends on whether your data contains good end-to-end trajectories.
+
+### Off-policy evaluation estimators
+
+| Estimator | Bias | Variance | Needs a model? | Horizon behavior | Use it when |
+|-----------|------|----------|----------------|------------------|-------------|
+| IPS (trajectory-level) | Unbiased if propensities are right | Highest; grows like `(1 + var(ratio))^H` | No | Unusable past about 10-20 steps (§6) | One-step decisions with good overlap |
+| Self-normalized IPS (SNIPS) | Small bias, vanishes as data grows | Lower than IPS; bounded by the reward range | No | Same collapse, a little later | Default replacement for plain IPS |
+| Per-decision IS | Unbiased | Lower than trajectory IS; each reward uses only the ratios up to its own step | No | Better than trajectory IS, still exponential | Multi-step with short horizons |
+| Direct method / FQE | Biased by model error, invisible offline | Lowest | Yes | Does not collapse | Long horizons, as one input to DR |
+| Doubly robust | Unbiased if either the model or the propensities are right | Between DM and IPS (§6: 21% below IPS) | Yes | Degrades more slowly than IS | The default for a ship gate |
 
 ---
 
@@ -408,13 +498,43 @@ The agent looks like it is optimizing long-horizon value (gamma is close to 1, t
 
 **Fix:** either extend the logged trajectory to actually span the metric you care about (session-level episodes for an LTV objective is a category error, not a tuning problem), or explicitly train against a shorter-horizon proxy metric that has been validated to correlate with the true delayed outcome — and validate that correlation with a held-out delayed-outcome model, not by assumption. [`design_dynamic_pricing.md`](../case_studies/design_dynamic_pricing.md) §9 documents a version of this failure mode for the same domain used above.
 
+### Pitfall 3: treating a time-limit cut as a real terminal state
+
+Logs are cut at operational boundaries: a dispatch shift ends at 18:00, a pricing episode is cut at midnight for the daily ETL. If the pipeline writes `done = 1` at that cut, every TD target there becomes `r + 0`, which teaches the Q-function that the state just before the cut is worth almost nothing. The value of the last decision of each shift is then underestimated by the whole discounted future the shift boundary hid.
+
+```python
+import torch
+
+GAMMA = 0.99
+
+def td_target_broken(r: torch.Tensor, v_next: torch.Tensor, done: torch.Tensor) -> torch.Tensor:
+    # BROKEN: `done` mixes true terminals (trip completed, customer churned)
+    # with truncations (shift ended, log file rolled over)
+    return r + GAMMA * v_next * (1 - done)
+
+def td_target_fixed(
+    r: torch.Tensor, v_next: torch.Tensor, terminated: torch.Tensor, truncated: torch.Tensor
+) -> torch.Tensor:
+    # FIX: only a real terminal stops bootstrapping. A truncated row still
+    # bootstraps from V(s'), because the world did not end at the cut.
+    del truncated  # kept in the schema so the two cases are never merged again
+    return r + GAMMA * v_next * (1 - terminated)
+
+r = torch.tensor([1.0])
+v_next = torch.tensor([50.0])
+print(td_target_broken(r, v_next, done=torch.tensor([1.0])))                   # tensor([1.])
+print(td_target_fixed(r, v_next, torch.tensor([0.0]), torch.tensor([1.0])))    # tensor([50.5000])
+```
+
+With `V(s') = 50`, the broken target is 1.0 and the correct one is 50.5, a 98% underestimate at every shift boundary. Log `terminated` and `truncated` as two fields, the split Gymnasium and Minari use, and audit the share of rows marked as each before training.
+
 ---
 
 ## 11. Technologies & Tools
 
 | Tool | Use Case | Notes |
 |------|----------|-------|
-| Pearl (Meta) | Production RL agent library | CQL, IQL, TD3+BC as offline methods alongside online actor-critic and bandits ([arXiv:2312.03814](https://arxiv.org/abs/2312.03814)); `github.com/facebookresearch/Pearl` |
+| Pearl (Meta) | Production-ready RL agent library | Offline: `ImplicitQLearning` (IQL), `TD3BC`, and CQL via `DeepQLearning(is_conservative=True)`, alongside online actor-critic and bandits ([arXiv:2312.03814](https://arxiv.org/abs/2312.03814)); `github.com/facebookresearch/Pearl` |
 | d3rlpy | Offline deep RL library, scikit-learn-style API | Actively maintained, PyPI (`pip install d3rlpy`); implements BC, BCQ, CQL, IQL, TD3+BC and more; `github.com/takuseno/d3rlpy` |
 | CORL (corl-team) | Single-file, research-oriented offline RL implementations | AWAC, BC, CQL, DT, IQL, TD3+BC, SAC-N, ReBRAC and others, each in one readable file; `github.com/corl-team/CORL` (formerly under `tinkoff-ai`) |
 | D4RL | Standard offline RL benchmark datasets | Maintained by Farama Foundation ([arXiv:2004.07219](https://arxiv.org/abs/2004.07219)); all D4RL offline datasets have moved to **Minari** (`Farama-Foundation/Minari`), the successor offline-dataset library where new dataset work happens, so new work should load them from Minari |
@@ -488,7 +608,7 @@ Policy-constraint methods restrict the *action space the policy is allowed to se
 **Q: What does Decision Transformer do differently from value-based offline RL, and what is its known failure mode?**
 **Short:** It replaces value functions with return-conditioned supervised sequence modeling, but struggles to stitch sub-optimal trajectories.
 
-Decision Transformer ([arXiv:2106.01345](https://arxiv.org/abs/2106.01345)) trains a causal transformer to autoregressively predict the next action given past states, actions, and a target return-to-go — there is no Bellman backup, no Q-function, and no `max` anywhere, just an ordinary sequence-modeling loss. This sidesteps extrapolation error entirely, since it never bootstraps off its own value estimates. Its documented weakness is **stitching**: value-based methods can in principle recombine the best segments of several individually mediocre trajectories into one better than any of them, because the Bellman equation reasons about states independent of which trajectory they came from; a sequence model conditioned on return-to-go tends to reproduce trajectory shapes it actually saw, and measurably underperforms on benchmark tasks (e.g. Maze2D) specifically designed to require stitching pieces of different logged paths together.
+Decision Transformer ([arXiv:2106.01345](https://arxiv.org/abs/2106.01345)) trains a causal transformer to autoregressively predict the next action given past states, actions, and a target return-to-go — there is no Bellman backup, no Q-function, and no `max` anywhere, just an ordinary sequence-modeling loss. This sidesteps extrapolation error entirely, since it never bootstraps off its own value estimates. Its documented weakness is **stitching**: value-based methods can in principle recombine the best segments of several individually mediocre trajectories into one better than any of them, because the Bellman equation reasons about states independent of which trajectory they came from; a sequence model conditioned on return-to-go tends to reproduce trajectory shapes it actually saw. The IQL paper's D4RL comparison shows the size of the gap: on the four medium and large AntMaze datasets, which require stitching, DT scores 0.0 on every one, while IQL scores 39.6 to 71.2.
 
 **Q: What role does propensity play in the importance-sampling ratio, and why must it be the actual logging probability rather than an assumed one?**
 **Short:** Propensity is the importance ratio's denominator; using an assumed value instead of the real one silently corrupts every downstream estimate.
@@ -527,6 +647,12 @@ First, run OPE (§6) as a triage filter, not a final answer — reject anything 
 6. **Sanity-check the learned value function at low-coverage states before trusting the policy it implies.** A spike or an implausible value where the behavior policy rarely visited (§5) is a warning sign an aggregate metric can hide.
 7. **Prefer in-sample methods (IQL) or well-tuned value-regularization (CQL) over sequence modeling (Decision Transformer) whenever trajectory stitching plausibly matters** — most industrial logs are a mixture of policies of varying quality, exactly the setting where stitching separates a good offline RL result from a mediocre one (§12).
 8. **Never assume a propensity you did not actually log.** A fabricated or aggregate-derived propensity produces an OPE estimate that looks valid and is not (§10, Pitfall 1) — there is no runtime signal that distinguishes it from a correct one.
+9. **Audit coverage before choosing a method.** Count logged rows per `(state bucket, action)` cell and report the share of cells under a floor (for example 50 rows). If the candidate policy's top action falls in an empty cell for more than a few percent of traffic, no algorithm will fix it; widen the logging policy's exploration first.
+10. **Store `terminated` and `truncated` as separate fields.** A shift end or a log rollover is not the end of the world, and merging the two flags silently zeroes the value of the last decision before every cut (§10, Pitfall 3).
+11. **Select hyperparameters offline with the same estimator you will gate on.** There is no live environment for a validation rollout, so pick `alpha_cql`, `tau` or the BC weight by fitted-Q evaluation or DR on a held-out slice of logs, split by time, not at random; a random split leaks the same users and days into train and validation.
+12. **Clip or self-normalize importance weights, and report the effective sample size beside every estimate.** An OPE number with an ESS of 40 out of 200,000 rows is a statement about 40 rows. Reporting ESS turns a hidden variance problem into a visible one.
+13. **Normalize rewards and keep the scale fixed across retrains.** CQL's `alpha` and IQL's temperature are tuned against the reward scale; changing the revenue unit from dollars to cents multiplies TD errors by 100 and silently changes how strong the conservatism is.
+14. **Version the behavior policy with the data.** Each row must name the policy version that produced its propensity. When the logging policy changes mid-dataset, an estimator that assumes one behavior policy is wrong for every row from the other.
 
 ---
 
@@ -542,6 +668,57 @@ First, run OPE (§6) as a triage filter, not a final answer — reject anything 
 2. **Constrained training.** IQL is chosen over CQL after the §8 comparison: the team's logs are a mixture of the heuristic's near-deterministic core policy and its randomized exploration slice, and IQL's in-sample guarantee (never querying an unlogged match) was judged the safer default for a first deployment, with CQL kept as a documented fallback if IQL's achievable value proves too conservative.
 3. **OPE gate.** The trained policy is scored with the doubly robust estimator from §6, using the IQL Q-function as the direct-method term. The team requires the DR point estimate to clear the current heuristic's logged average by a margin larger than the estimator's own confidence interval — not merely a positive delta — before promoting a candidate.
 4. **Canary and A/B test.** Candidates that clear the OPE gate run first in shadow mode (logged, not acted on) for one week, then in a single-city canary with a kill switch on driver utilization and rider wait-time guardrails, before a full geographic A/B test.
+
+**BROKEN -> FIX: the OPE gate first ran on reconstructed propensities.** The first gate build
+did not join the logged per-decision propensity; it recomputed one as "how often was this kind
+of action taken across the whole log". The heuristic picks the nearest rider 92% of the time
+and a uniformly random candidate 8% of the time, so the true probability of picking one
+specific non-nearest rider depends on how many candidates the state had. Downtown states have 4
+candidates, suburban states 2, and the reconstructed number averages them away.
+
+```python
+import numpy as np
+
+EPS = 0.08
+# state type -> (share of decisions, candidates in radius, reward of "hold for zone rider")
+STATES = {"downtown": (0.5, 4, 30.0), "suburb": (0.5, 2, 12.0)}
+
+
+def true_propensity(n_candidates: int) -> float:
+    """Probability the heuristic picked ONE specific non-nearest rider."""
+    return EPS / n_candidates
+
+
+def ips_expectation(propensity_of: dict[str, float]) -> float:
+    """Expected IPS value of the candidate policy 'always hold for the zone rider'."""
+    total = 0.0
+    for name, (share, n_cand, reward) in STATES.items():
+        p_logged = true_propensity(n_cand)          # how often the log actually holds this action
+        total += share * p_logged * (1.0 / propensity_of[name]) * reward
+    return total
+
+
+true_value = sum(share * reward for share, _, reward in STATES.values())
+
+# BROKEN: one pooled frequency for the action type, ignoring the state
+pooled = sum(share * true_propensity(n) for share, n, _ in STATES.values())
+broken = ips_expectation({name: pooled for name in STATES})
+
+# FIX: the propensity logged at decision time, per state
+fixed = ips_expectation({name: true_propensity(n) for name, (_, n, _) in STATES.items()})
+
+print(f"true {true_value:.1f}  broken {broken:.1f}  fixed {fixed:.1f}")
+# true 21.0  broken 18.0  fixed 21.0
+assert np.isclose(fixed, true_value) and not np.isclose(broken, true_value)
+```
+
+The pooled propensity is 0.03 for both state types, while the true values are 0.02 downtown and
+0.04 in the suburbs. The broken gate under-weights downtown rows by a third and over-weights
+suburban rows by a third, and because downtown holds pay more, the estimate comes out 14% low
+(18.0 against 21.0) even with infinite data. In production the bias ran the other way on a
+different candidate, which is how the team found it: a policy that looked 6% better offline
+was flat in the canary. The fix was a schema rule, not a model change: the gate refuses any
+row whose propensity was not written by the serving path at decision time.
 
 **Outcome and honest caveats:** the offline-trained policy's DR-estimated utilization gain was consistent with, though smaller than, the gain the online contextual-bandit pre-positioning layer already achieves in [`design_marketplace_matching.md`](../case_studies/design_marketplace_matching.md) §11 — expected, since the offline policy is solving a narrower single-decision problem, not the full shift-length pre-positioning problem. The team explicitly did not claim the OPE estimate as ground truth: the A/B test was run in full regardless of how strong the offline number looked, consistent with §12's answer on why OPE intervals rarely settle a ship decision alone.
 

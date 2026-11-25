@@ -1,5 +1,7 @@
 # State Space Models (S4, Mamba, xLSTM) — Deep Dive
 
+> Papers, model releases and the `mamba-ssm` install behaviour on this page were checked against arXiv, the `state-spaces/mamba` README and vendor announcements on 2026-11-25.
+
 ## 1. Concept Overview
 
 State space models (SSMs) are a third path for sequence modeling, sitting between the two architectures the [parent module](recurrent_neural_networks.md) covers: they keep the constant-size recurrent state that makes an RNN cheap to run, but replace the RNN's hand-tuned gates with a linear dynamical system whose recurrence can *also* be computed as a convolution — which is what makes it trainable at Transformer speed. S4 (Structured State Space, Gu, Goel & Ré, 2021) showed a stable, well-initialized linear SSM could solve long-range sequence benchmarks no RNN could touch. Mamba (Gu & Dao, 2023) made the SSM's parameters depend on the input — "selective" — which gives it the content-based routing that made attention so effective, at the cost of losing the convolutional shortcut. Mamba-2 (Dao & Gu, 2024) then proved SSMs and linear attention are mathematically the same family of operation, letting Mamba-2 reuse the matrix-multiply hardware Transformers already exploit.
@@ -126,8 +128,8 @@ import torch
 from torch import Tensor
 
 
-def discretize_zoh(A: Tensor, B: Tensor, delta: Tensor) -> tuple[Tensor, Tensor]:
-    """Zero-order-hold discretization used by S4 and Mamba.
+def discretize(A: Tensor, B: Tensor, delta: Tensor, exact_b: bool = False) -> tuple[Tensor, Tensor]:
+    """Discretization as used by Mamba's reference code.
 
     A: (d_inner, d_state) continuous-time state matrix (diagonal here, so
        stored as its diagonal entries — this is the S4D / Mamba convention,
@@ -136,14 +138,38 @@ def discretize_zoh(A: Tensor, B: Tensor, delta: Tensor) -> tuple[Tensor, Tensor]
        input-dependent (selective), so its leading dims carry (batch, seq_len).
     delta: (..., d_inner) the learned/selective step size, one per channel
        per timestep.
-    Returns discrete (A_bar, B_bar) with an extra d_inner axis broadcast in.
+    A_bar always uses the zero-order hold exp(delta*A). B_bar defaults to the
+    first-order (Euler) simplification delta*B that Mamba's reference scan
+    uses; exact_b=True gives the full ZOH form (delta*A)^-1 (exp(delta*A) - I) delta*B,
+    computed elementwise because A is diagonal.
     """
-    deltaA = torch.exp(delta.unsqueeze(-1) * A)  # (..., d_inner, d_state)
-    # Zero-order hold for B: (A)^-1 (exp(A) - I) B, done elementwise since A
-    # is diagonal here — this is the numerically-stable diagonal-only version.
-    deltaB = delta.unsqueeze(-1) * B.unsqueeze(-2)  # (..., d_inner, d_state)
-    return deltaA, deltaB
+    dA = delta.unsqueeze(-1) * A                           # (..., d_inner, d_state)
+    A_bar = torch.exp(dA)
+    dB = delta.unsqueeze(-1) * B.unsqueeze(-2)             # (..., d_inner, d_state)
+    if not exact_b:
+        return A_bar, dB
+    return A_bar, torch.expm1(dA) / dA * dB                # ZOH; dA < 0, so no 0/0
+
+
+def _check_discretize() -> None:
+    A = torch.tensor([[-0.5]])
+    B = torch.ones(1, 1)
+    delta = torch.tensor([[0.1]])
+    _, b_euler = discretize(A, B, delta)
+    _, b_zoh = discretize(A, B, delta, exact_b=True)
+    # Euler: 0.1. ZOH: (exp(-0.05) - 1) / -0.5 = 0.09754. Gap 2.5% at delta=0.1.
+    assert abs(b_euler.item() - 0.1) < 1e-6
+    assert abs(b_zoh.item() - 0.097541) < 1e-5
+
+
+if __name__ == "__main__":
+    _check_discretize()
 ```
+
+The two `B_bar` forms agree to first order in `Δ`: at `Δ·A = -0.05` the gap is 2.5%, and it
+grows as the step size grows. Mamba keeps the exact ZOH form for `A_bar`, because the decay
+rate decides how long the state remembers, and accepts the cheap Euler form for `B_bar`, because
+any scale error there is absorbed by the learned projection that produces `B`.
 
 ### Selective scan — sequential reference implementation
 
@@ -154,8 +180,8 @@ resident in fast SRAM instead of round-tripping it through HBM, and recomputes
 intermediate activations in the backward pass instead of storing them — the
 same trick FlashAttention uses to make an O(L) memory-bound operation fast.
 A plain Python loop over timesteps is O(L) sequential and un-parallelized —
-correct, and useful for understanding the recurrence, but roughly 20-40x
-slower than the fused kernel on GPU.
+correct, and useful for understanding the recurrence, but far slower than the fused kernel
+on GPU because every timestep is a separate small kernel launch.
 
 ```python
 import torch
@@ -219,6 +245,74 @@ state accumulates `x_0=1.0`, `x_1=0.7788*1.0-0.1=0.6788`, `x_2=0.3679*0.6788+4.0
 each step is exactly `A_bar_t * (previous state) + (this step's gated input)`, the same
 "mix a re-weighted copy of the old summary with the current input" reading the parent
 module gives the vanilla RNN, minus the `tanh` squash.
+
+### Parallel scan — why selectivity does not force sequential training
+
+Each step `x_t = a_t * x_{t-1} + b_t` is an affine map `(a_t, b_t)`. Composing two of them gives
+another affine map: applying `(a1, b1)` then `(a2, b2)` equals `(a2*a1, a2*b1 + b2)`. That
+combine operator is associative, so a Hillis-Steele scan can build every prefix in `log2(L)`
+rounds. The code below runs the scan on the same three steps as `_demo()` and checks it against
+the sequential loop.
+
+```python
+import math
+
+import torch
+from torch import Tensor
+
+
+def combine(left: tuple[Tensor, Tensor], right: tuple[Tensor, Tensor]) -> tuple[Tensor, Tensor]:
+    """Apply `left` first, then `right`. Associative, so any bracketing gives the same result."""
+    a1, b1 = left
+    a2, b2 = right
+    return a2 * a1, a2 * b1 + b2
+
+
+def parallel_scan(a: Tensor, b: Tensor) -> Tensor:
+    """Inclusive scan over the time axis (dim 0). Returns all states x_1..x_L with x_0 = 0.
+
+    log2(L) rounds; inside each round every position updates independently,
+    which is the work a GPU kernel spreads across threads.
+    """
+    a, b = a.clone(), b.clone()
+    length = a.shape[0]
+    for k in range(math.ceil(math.log2(length))):
+        step = 2 ** k
+        a_new, b_new = combine((a[:-step], b[:-step]), (a[step:], b[step:]))
+        a = torch.cat([a[:step], a_new])
+        b = torch.cat([b[:step], b_new])
+    return b
+
+
+def sequential_scan(a: Tensor, b: Tensor) -> Tensor:
+    x = torch.zeros_like(b[0])
+    out = []
+    for t in range(a.shape[0]):
+        x = a[t] * x + b[t]
+        out.append(x)
+    return torch.stack(out)
+
+
+if __name__ == "__main__":
+    # Same numbers as _demo(): a_t = exp(delta_t * A), b_t = delta_t * B * u_t.
+    a = torch.exp(torch.tensor([1.0, 0.5, 2.0]) * -0.5)
+    b = torch.tensor([1.0, 0.5, 2.0]) * torch.tensor([1.0, -0.2, 2.0])
+    par = parallel_scan(a, b)
+    seq = sequential_scan(a, b)
+    assert torch.allclose(par, seq, atol=1e-6)
+    print([round(v, 4) for v in par.tolist()])  # [1.0, 0.6788, 4.2497]
+
+    long_a = torch.rand(1024) * 0.9
+    long_b = torch.randn(1024)
+    assert torch.allclose(parallel_scan(long_a, long_b), sequential_scan(long_a, long_b), atol=1e-5)
+```
+
+Worked count for `L = 1024`: the sequential loop takes 1,024 dependent steps. The scan takes
+`log2(1024) = 10` rounds, and each round does at most 1,023 independent combines, so the depth
+drops 102x while the total work rises to about `10 x 1024 = 10,240` combines. A GPU is idle
+during a dependent chain and busy during independent work, so trading 10x more arithmetic for
+102x less depth is a win. Production kernels use the work-efficient Blelloch form or, in
+Mamba-2, a chunked matrix form, which keeps the total work at `O(L)`.
 
 ### Mamba-3: complex state and MIMO decoding
 
@@ -294,6 +388,14 @@ projection, rather than alternating attention-layer / SSM-layer sequentially. Re
 0.5B-34B scale, the 34B flagship is reported to match or outperform models up to 70B
 (Qwen3-32B, Qwen2.5-72B, Llama-3.3-70B class) with fewer parameters and less training data.
 
+**Granite 4.0 (IBM, hybrid for enterprise serving).** IBM's Granite 4.0 hybrids combine a
+majority of Mamba-2 layers with a small number of attention layers: Granite-4.0-H-Small is an
+MoE with 32B total and 9B active parameters, H-Tiny 7B total and 1B active, and H-Micro a dense
+3B. IBM reports over 70% less RAM than conventional Transformers for long inputs and many
+concurrent sessions, which is the KV-cache arithmetic of Section 6 showing up as a hardware
+bill. IBM also ships Granite-4.0-Micro, a plain Transformer, for runtimes that do not yet
+support hybrids, which is the ecosystem-maturity cost in Section 8 made concrete.
+
 **Streaming keyword spotting and on-device audio (constant-state inference).** The same
 property that makes SSMs attractive for streaming RNN inference in the parent module —
 `O(state)` memory per step, independent of stream length — applies directly to always-on
@@ -310,7 +412,7 @@ pipeline this plugs into, and [time_series_forecasting.md](../time_series_foreca
 | Inference memory | `O(hidden_size)` — constant per step | `O(d_inner x d_state)` — constant per step, same order as LSTM | `O(seq_len x hidden)` — KV cache grows with every generated token |
 | Inference latency/token | `O(hidden_size^2)` per step, hardware-limited by sequential dependency | Same shape as LSTM — sequential recurrent generation, but a much cheaper per-step matmul at large `d_inner` since state is diagonal | Grows with context length as the KV cache is re-read every step |
 | Exact recall / copying | Weak beyond a few hundred steps (Section 3, vanishing gradient) | Provably bounded by fixed state size — Jelassi et al. show state space models are fundamentally limited on copying tasks that a two-layer Transformer solves exactly (Section 10) | Strong — any token is one attention lookup away, independent of distance |
-| Ecosystem maturity | Mature: `torch.nn.LSTM`/`GRU` are cuDNN-accelerated, stable for a decade | Young: `mamba-ssm` requires Linux + a custom CUDA kernel build; HF `transformers` support exists but is newer and narrower than its Transformer coverage | Most mature: every major training/serving framework is Transformer-first |
+| Ecosystem maturity | Mature: `torch.nn.LSTM`/`GRU` are cuDNN-accelerated, stable for a decade | Young: `mamba-ssm` is Linux-only and its Mamba-1 fast path needs an opt-in CUDA/HIP build; HF `transformers` support exists but is newer and narrower than its Transformer coverage | Most mature: every major training/serving framework is Transformer-first |
 | Best long-sequence domain | Short-medium streaming (audio frames, sensor ticks) | Very long streams where content is smooth/compressible: long audio, genomics, long multivariate time series | Any length where GPU budget allows a KV cache and exact retrieval matters |
 
 ---
@@ -387,16 +489,32 @@ workloads, while explicit retrieval is the right fix even for a Transformer once
 is too long to fit at all.
 
 **Pitfall — treating `mamba-ssm`'s optimized kernel as portable, then failing to deploy.**
-A team validated a Mamba model in a notebook (CPU fallback, or a dev box with the compiled
-CUDA extension already built) and only discovered at deployment time that the production
-inference servers were not Linux, or lacked the toolchain to build `causal_conv1d` and
-`mamba-ssm`'s CUDA extensions — the model would technically run via the library's plain
-"eager" PyTorch fallback path, at a fraction of the throughput the design was budgeted on.
-Fix: pin the exact `mamba-ssm`/`causal_conv1d` build requirements (Linux, matching CUDA
-toolkit and PyTorch version) into the serving image at design time, not deployment time, and
-benchmark the eager fallback path explicitly if there is any chance a target environment
-cannot build the optimized kernel — do not assume "it imports without error" means "it runs
-at the throughput the paper reports."
+A team validated a Mamba-1 model on a dev box where `selective_scan_cuda` had been compiled,
+then built the serving image with a plain `pip install mamba-ssm --no-build-isolation`. Since
+the current README, that default install skips `selective_scan_cuda` entirely; the CUDA
+extension is opt-in through `MAMBA_KEEP_CUDA_BUILD=TRUE`. The `mamba-ssm` Mamba-1 module then
+raises `RuntimeError: selective_scan_cuda is not installed` at the first forward pass, while
+the same checkpoint loaded through Hugging Face `transformers` logs one warning and falls back
+to its slow PyTorch path, so the second deployment "works" at a fraction of the budgeted
+throughput. Fix: build the serving image with the opt-in flag on Linux with a matching CUDA
+toolkit and PyTorch (or the HIP wheel on AMD), assert at startup that the fast path is present,
+and benchmark the image you ship, not the dev box.
+
+```python
+# BROKEN: serving image built with `pip install mamba-ssm --no-build-isolation`
+from mamba_ssm.modules.mamba_simple import Mamba
+layer = Mamba(d_model=2048).cuda()   # first forward raises: selective_scan_cuda is not installed
+
+# FIX: build with MAMBA_KEEP_CUDA_BUILD=TRUE and fail fast at startup if the kernel is absent
+import importlib.util
+
+def assert_fast_path() -> None:
+    for module in ("selective_scan_cuda", "causal_conv1d"):
+        if importlib.util.find_spec(module) is None:
+            raise SystemExit(f"{module} missing: rebuild the image with MAMBA_KEEP_CUDA_BUILD=TRUE")
+
+assert_fast_path()
+```
 
 **Pitfall — resetting selectivity's `Δ` the same way an LSTM resets hidden state, and getting it backwards.**
 A team porting streaming-inference code from an LSTM pipeline reset the SSM's recurrent
@@ -414,7 +532,7 @@ or `C` from the input.
 
 | Tool | Purpose |
 |---|---|
-| `mamba-ssm` (PyPI) | Official Mamba/Mamba-2/Mamba-3 package from the `state-spaces/mamba` repo (`Mamba`, `Mamba2`, `Mamba3` modules; `Mamba3(is_mimo=True, mimo_rank=4)` for MIMO); ships the fused CUDA selective-scan kernel. Linux-only, requires a matching CUDA toolkit + PyTorch build |
+| `mamba-ssm` (PyPI) | Official Mamba/Mamba-2/Mamba-3 package from the `state-spaces/mamba` repo (`Mamba`, `Mamba2`, `Mamba3` modules; `Mamba3(is_mimo=True, mimo_rank=4)` for MIMO). Linux only. Mamba-2 and Mamba-3 run on Triton kernels; the Mamba-1 CUDA/HIP `selective_scan_cuda` extension is opt-in (`MAMBA_KEEP_CUDA_BUILD=TRUE`) |
 | `causal_conv1d` | Companion package providing the fused causal 1D convolution Mamba uses before the scan; required alongside `mamba-ssm` for the optimized path |
 | `transformers` (Hugging Face) | `MambaConfig`/`MambaForCausalLM`, `Mamba2Config`, and `JambaForCausalLM` ship in the library, giving Mamba/Mamba-2/Jamba the same `from_pretrained`/`generate` API as any Transformer checkpoint |
 | `state-spaces/mamba` (GitHub) | Upstream reference implementation and pretrained checkpoint releases (`mamba-130m` through `mamba-2.8b`, plus `-hf` variants for `transformers`) |
@@ -435,8 +553,8 @@ S4's convolutional trick works because `A_bar`, `B_bar`, and `C` are the same ma
 Jelassi et al. ("Repeat After Me," arXiv:2402.01032) prove a generalized SSM's ability to copy or retrieve a token verbatim is bounded by its fixed-size latent state, while a two-layer Transformer can copy strings of exponential length because attention gives every position a direct, lossless lookup into every prior position. In practice this shows up as a model that summarizes long documents well but hallucinates when asked for one exact figure buried deep in the context. The fix is architectural (a hybrid with a few attention layers, exactly why Jamba/Nemotron-H/Falcon-H1 exist) or a retrieval step that puts the exact span back into context rather than relying on the compressed state to have preserved it.
 
 **Q: Why is `mamba-ssm` Linux-only, and what happens if you deploy without the compiled CUDA kernel?**
-**Short:** The optimized selective-scan kernel is a custom CUDA extension; without it the library silently falls back to a much slower eager path.
-The official package's speed comes from a fused CUDA kernel (`selective_scan_cuda`) that keeps intermediate state in GPU SRAM and recomputes activations in the backward pass instead of storing them; that kernel has to be compiled against a specific CUDA toolkit and PyTorch build, which the maintained wheels currently support only on Linux. If the compiled extension is missing at import time, `mamba-ssm`/`transformers` fall back to a plain PyTorch ("eager") implementation that is still numerically correct but runs at a fraction of the throughput — the failure mode is silent (the model still produces correct output), which is what makes it dangerous: a benchmark run on a dev box with the kernel built can look nothing like production if the kernel silently isn't there.
+**Short:** The fast Mamba-1 scan is an opt-in compiled extension; without it mamba-ssm raises an error and transformers falls back to a slow path.
+The official package's speed comes from a fused kernel (`selective_scan_cuda`) that keeps intermediate state in GPU SRAM and recomputes activations in the backward pass instead of storing them; it is compiled against a specific CUDA (or HIP) toolkit and PyTorch build, and the package lists Linux as a core requirement. Since the current README, a plain `pip install mamba-ssm --no-build-isolation` does not build that extension at all; you opt in with `MAMBA_KEEP_CUDA_BUILD=TRUE`. Without it, the `mamba-ssm` Mamba-1 module raises `selective_scan_cuda is not installed` on the first forward pass, while a checkpoint loaded through Hugging Face `transformers` logs a warning and runs its slow PyTorch path. The second case is the dangerous one: output stays correct, so only a throughput benchmark of the shipped image catches it. Mamba-2 and Mamba-3 use Triton kernels instead, so they do not depend on this extension.
 
 **Q: What is HiPPO initialization and why does S4 need it instead of random initialization?**
 **Short:** HiPPO gives S4's state matrix A a provably optimal structure for compressing history, instead of an untrained random one.
@@ -511,8 +629,9 @@ At inference/generation time, an SSM genuinely runs the sequential recurrence on
   production system that might need exact retrieval from long context — do not assume "long
   context" and "exact recall over long context" are the same requirement.
 - Pin the exact `mamba-ssm` / `causal_conv1d` build environment (Linux, matching CUDA
-  toolkit, matching PyTorch version) into the deployment artifact; never assume the eager
-  PyTorch fallback path delivers the throughput a benchmark measured with the compiled kernel.
+  toolkit, matching PyTorch version, `MAMBA_KEEP_CUDA_BUILD=TRUE` for Mamba-1) into the
+  deployment artifact, and assert at startup that the fast path is present; never assume the
+  `transformers` slow path delivers the throughput a benchmark measured with the compiled kernel.
 - Benchmark needle-in-a-haystack / exact-copying tasks explicitly before shipping a pure SSM
   for any retrieval-adjacent workload — general perplexity or summarization quality does not
   surface this failure mode.
@@ -585,11 +704,57 @@ forecasting model, and only then confirmed a pure SSM was appropriate for this c
 **Per-stream memory.** With `d_model=256`, `expand=2` (`d_inner=512`), `d_state=32`, 4 layers,
 fp16: `512 x 32 x 4 layers x 2 bytes = 131,072 bytes = 128 KB` per stream — at 200,000
 concurrent streams, `128 KB x 200,000 ≈ 24.4 GB` total, a fixed number regardless of how
-long any individual stream has been running. The equivalent fixed-window Transformer
+long any individual stream has been running. The short causal convolution before each scan
+adds its own small rolling buffer: with `d_conv = 4` and one B/C group, `(512 + 2 x 32) x 4
+positions x 4 layers x 2 bytes = 18,432 bytes`, about 18 KB per stream or 3.4 GB across the
+fleet, still fixed. The equivalent fixed-window Transformer
 approach the team prototyped first required re-processing a sliding window of raw
 observations per forecast call, and its cost scaled with window length rather than being a
 one-time fixed footprint — at the 6-hour lookback window product wanted, that prototype could
 not fit the same fleet's memory budget at 200,000 concurrent streams.
+
+**BROKEN -> FIX: a recycled state slot leaked one machine's history into another.**
+The serving loop kept the 200,000 per-stream states in one preallocated GPU tensor and
+reassigned a slot when a sensor went offline. The first version reassigned the slot without
+clearing it, so a replacement pump inherited the decayed state of a failed compressor and
+raised false alarms for its first few minutes, until the old history decayed away. The output
+was valid-looking risk scores, so no assertion fired; the bug surfaced as a cluster of alerts
+on newly commissioned machines.
+
+```python
+import torch
+from torch import Tensor
+
+
+class StreamStates:
+    """One fixed-size recurrent state per stream slot, preallocated on the GPU."""
+
+    def __init__(self, n_slots: int, n_layers: int, d_inner: int, d_state: int) -> None:
+        self.state: Tensor = torch.zeros(n_slots, n_layers, d_inner, d_state, dtype=torch.float16)
+        self.owner: dict[int, str] = {}
+
+    # BROKEN: the slot keeps the previous stream's state
+    def assign_broken(self, slot: int, stream_id: str) -> None:
+        self.owner[slot] = stream_id
+
+    # FIX: zero the runtime state when ownership changes; model weights are never touched
+    def assign(self, slot: int, stream_id: str) -> None:
+        if self.owner.get(slot) != stream_id:
+            self.state[slot].zero_()
+        self.owner[slot] = stream_id
+
+
+if __name__ == "__main__":
+    pool = StreamStates(n_slots=4, n_layers=4, d_inner=512, d_state=32)
+    pool.assign(0, "compressor-17")
+    pool.state[0] += 1.0                      # history accumulates
+    pool.assign_broken(0, "pump-03")
+    assert pool.state[0].abs().sum() > 0      # leaked history
+    pool.assign(0, "pump-04")
+    assert pool.state[0].abs().sum() == 0     # clean start
+    bytes_per_slot = pool.state[0].numel() * pool.state.element_size()
+    print(bytes_per_slot)                     # 131072 = 128 KB, the Section 14 budget
+```
 
 **Operational result.** The Mamba-2 encoder path held per-stream state to a fixed budget
 that let the team plan GPU fleet size directly from stream count rather than from a

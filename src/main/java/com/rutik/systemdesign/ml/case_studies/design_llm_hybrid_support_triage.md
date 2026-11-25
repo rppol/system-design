@@ -833,7 +833,7 @@ Cost is not the disqualifying factor here — $16,800/year is inside the budget.
 A 40-class DistilBERT trained on the labelled head cannot emit a label it has never seen. Every tail ticket is forced into the nearest head bucket and is wrong by construction: `0.85 x 0.94 + 0.15 x 0 ~= 80%`. That is not a rounding error — one ticket in five lands in the wrong queue, and the failing fifth is disproportionately the tickets that most need a specialist, because that is what "tail" means. The deeper point is that you could not fix this by training harder: the tail has no labels, so there is no supervised problem to solve until something manufactures them.
 
 **Q: What makes the confidence threshold trustworthy? A softmax is not a probability.**
-**Short:** Temperature scaling on a held-out set. One scalar, fitted post-hoc, monotone — so it recalibrates confidence without changing any prediction.
+**Short:** Temperature scaling on a held-out set: one post-hoc, monotone scalar that recalibrates confidence without changing any prediction.
 
 Modern deep classifiers are systematically overconfident, so an uncalibrated `tau` has no stable meaning and the fallback rate moves for reasons nobody can explain. Temperature scaling divides the logits by a single learned `T` fitted by minimising NLL on a held-out set the model never trained on; because it is monotone it cannot change an argmax, so accuracy is untouched and only the confidence is repaired. The operational consequence people miss: **refit `T` on every retrain**, or the sweep that justified `tau = 0.75` no longer describes the model in production.
 
@@ -868,7 +868,7 @@ Once a tail category accumulates a few hundred confirmed examples at an acceptab
 Count alone measures volume, not reliability. Promoting a high-override category moves the teacher's confusion into the student, where the router will be confident about it and no review sample will ever see it again. The gate is two-sided by design: at least 300 reviewer-confirmed examples *and* an override rate under 15%. A category failing the second test is a signal to fix its prompt or split it, not to train on it.
 
 **Q: How would you decide between a hosted API and a self-hosted open-weight model for the fallback tier?**
-**Short:** Volume and data residency. Below a few million fallback calls a month the hosted API wins on total cost of ownership; PII constraints can veto it outright.
+**Short:** Volume and data residency decide it: below a few million fallback calls a month the hosted API wins on total cost, but PII constraints can veto it outright.
 
 At 304k calls/month the hosted API costs $213/month and requires no GPU fleet, no serving stack, no eval harness for a model you own, and no capacity planning — taxonomy changes are a prompt edit. A self-hosted 8B model has a near-zero marginal cost per call but a fixed floor of instance cost and operational burden, so it wins only once volume amortises that floor, somewhere above a couple of million calls a month at this prompt size. The constraint that overrides the arithmetic entirely is data handling: if ticket text cannot leave your infrastructure, self-hosting is not a cost decision, it is the only option.
 

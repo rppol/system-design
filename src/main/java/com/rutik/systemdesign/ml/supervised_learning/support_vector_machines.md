@@ -777,6 +777,29 @@ A team used One-Class SVM to detect network intrusions but found 80% false negat
 **Pitfall 6 — Forgetting to scale the target in SVR**
 SVR's epsilon parameter is in the units of the target variable. If the target has large variance (e.g., house prices in dollars, range $50k–$5M), a default epsilon=0.1 is meaningless. Scaling the target to zero mean, unit variance (then inverse-transforming predictions) makes epsilon meaningful and training more stable.
 
+**Pitfall 6 as code: SVR on an unscaled target.**
+
+```python
+# BROKEN: the target is in dollars; epsilon=0.1 and C=1.0 are meaningless at that scale
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVR
+
+svr = make_pipeline(StandardScaler(), SVR(C=1.0, epsilon=0.1)).fit(X, y_dollars)
+```
+
+```python
+# FIX: scale the target too, and invert the scaling automatically at predict time
+from sklearn.compose import TransformedTargetRegressor
+
+svr = TransformedTargetRegressor(
+    regressor=make_pipeline(StandardScaler(), SVR(C=1.0, epsilon=0.1)),
+    transformer=StandardScaler(),
+).fit(X, y_dollars)
+```
+
+With a target around 300,000, the 0.1 epsilon tube is negligible and `C=1.0` caps each dual coefficient at 1, so the fitted function can barely move away from its intercept and predictions are nearly constant. The model fits without error. Scaling `y` puts epsilon and C in units of standard deviations, where the defaults are sensible, and `TransformedTargetRegressor` returns predictions in dollars.
+
 ---
 
 ## 11. Technologies & Tools
@@ -943,3 +966,34 @@ flowchart LR
 **Alternative considered**: RBF SVM scored 82% (lower — the linear kernel fits better in this very high-dimensional space, which is expected). Gradient boosting scored 79% due to insufficient data for ensemble methods.
 
 **Biological insight from coefficients**: the top 20 genes by |w_j| for subtype 1 included 14 genes from the HER2 pathway, matching established HER2-amplified breast cancer biology. The linear SVM's interpretable coefficients were critical for publication and FDA regulatory review of the diagnostic claim.
+
+**BROKEN → FIX: choosing genes with the labels before cross-validating.** The pipeline above filters on
+variance, which never looks at the labels; the common variant that ranks genes by how well they separate the
+subtypes is where d >> n studies go wrong.
+
+```python
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# BROKEN: pick the 5,000 most label-associated genes using all 200 samples, then cross-validate
+X_sel = SelectKBest(f_classif, k=5000).fit_transform(X, y)
+broken_acc = cross_val_score(make_pipeline(StandardScaler(), LinearSVC(C=0.01, max_iter=5000)),
+                             X_sel, y, cv=cv).mean()
+```
+
+```python
+# FIX: selection is a step of the model, refit inside every training fold
+pipe = make_pipeline(SelectKBest(f_classif, k=5000), StandardScaler(), LinearSVC(C=0.01, max_iter=5000))
+honest_acc = cross_val_score(pipe, X, y, cv=cv).mean()
+```
+
+With 20,000 genes and 200 samples, some genes separate the subtypes by chance, and selecting them on all
+samples lets the validation folds' labels choose the features they are later scored with. Ambroise and
+McLachlan (PNAS, 2002, "Selection bias in gene extraction on the basis of microarray gene-expression data")
+showed this external selection can drive the estimated error close to zero even when there is no signal.
+A quick check: shuffle `y` and rerun both lines; the fixed pipeline falls to chance, the broken one does not.

@@ -979,4 +979,32 @@ The `pReport` weight is strongly negative so a likely-to-be-reported post is vet
 - Each head recalibrated with isotonic regression post-training so the multiplicative score stays meaningful.
 - Position-bias correction added as an auxiliary shallow tower, so ranking does not conflate "shown at position 1" with "good."
 
-**Outcome.** Versus the click-only baseline: watch fraction +6%, share rate +4%, report rate −18%, and 28-day retention +1.1% — the first retention win in a year, achieved because PLE let the conflicting engagement and satisfaction objectives improve together instead of trading off. Full production system (two-tower retrieval, DPP diversity, delayed negatives, feedback-loop mitigation) is detailed in [`../case_studies/design_content_feed_ranking.md`](../case_studies/design_content_feed_ranking.md); the ads-side pCTR/pCVR analogue is in [`../case_studies/design_ads_click_prediction.md`](../case_studies/design_ads_click_prediction.md). For where MTL sits in an end-to-end design interview, see [`../ml_system_design/design_framework.md`](../ml_system_design/design_framework.md); for the deep-recommender backbones these heads sit on, see [`../recommender_systems/deep_learning_recommenders.md`](../recommender_systems/deep_learning_recommenders.md).
+**Outcome.** Versus the click-only baseline: watch fraction +6%, share rate +4%, report rate −18%, and 28-day retention +1.1% — the first retention win in a year, achieved because PLE let the conflicting engagement and satisfaction objectives improve together instead of trading off.
+
+**BROKEN → FIX: treating a missing survey answer as a "no".** The `mask` in `train_step` is the whole difference between a survey head and a survey-display predictor.
+
+```python
+import torch
+import torch.nn.functional as F
+
+
+# BROKEN: unanswered surveys stored as 0 and trained on every impression
+def survey_loss_broken(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    labels = labels.nan_to_num(0.0)                        # >99% of pSurvey targets become negatives
+    return F.binary_cross_entropy_with_logits(logits, labels)
+# the head learns P(survey was shown AND answered "valuable"), which is dominated by the
+# survey sampling policy, not by whether the post was valuable
+```
+
+```python
+# FIX: a missing label contributes nothing; each task is averaged over its own answered rows
+def multitask_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    mask = (~labels.isnan()).float()                       # (B, 5): 1 where a label exists
+    targets = labels.nan_to_num(0.0)                       # value is irrelevant where mask == 0
+    per_ex = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    return (per_ex * mask).sum(0) / mask.sum(0).clamp(min=1.0)   # (5,) per-task losses
+```
+
+With the broken loss the survey head's outputs mostly track which users and surfaces were sampled for surveys, and because the fused score multiplies by `pSurvey^0.8`, that sampling policy leaks straight into the feed ranking. With the mask the head estimates P(valuable | answered), learned from the under-1% of impressions that carry an answer, which is the quantity the satisfaction objective asked for.
+
+Full production system (two-tower retrieval, DPP diversity, delayed negatives, feedback-loop mitigation) is detailed in [`../case_studies/design_content_feed_ranking.md`](../case_studies/design_content_feed_ranking.md); the ads-side pCTR/pCVR analogue is in [`../case_studies/design_ads_click_prediction.md`](../case_studies/design_ads_click_prediction.md). For where MTL sits in an end-to-end design interview, see [`../ml_system_design/design_framework.md`](../ml_system_design/design_framework.md); for the deep-recommender backbones these heads sit on, see [`../recommender_systems/deep_learning_recommenders.md`](../recommender_systems/deep_learning_recommenders.md).

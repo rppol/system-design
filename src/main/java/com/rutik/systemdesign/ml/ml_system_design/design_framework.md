@@ -683,6 +683,35 @@ def should_retrain(
 
 **Training-serving skew in feature discussion**: proposing feature engineering in training (Spark join) without noting that serving must compute the same features in real-time (fast path). If you don't address this, experienced interviewers will ask "how do you ensure the features in training match what you compute at serving time?" — and if you haven't thought about it, the answer will show.
 
+**BROKEN → FIX: training a ranker on raw clicks with no position signal.** The position-bias pitfall above, in code. Logged impressions carry the slot each item was shown in.
+
+```python
+import lightgbm as lgb
+import pandas as pd
+
+FEATURES: list[str] = ["user_genre_affinity", "item_ctr_7d", "item_age_days"]   # illustrative
+
+
+# BROKEN: the model cannot tell "good item" from "item that sat in slot 1"
+def train_broken(logs: pd.DataFrame) -> lgb.LGBMClassifier:
+    return lgb.LGBMClassifier(n_estimators=500).fit(logs[FEATURES], logs["clicked"])
+# a mediocre item that held slot 1 for a week inherits slot 1's click rate as "quality",
+# gets ranked first again, and the feedback loop locks it in
+```
+
+```python
+# FIX: position is a training feature, then held constant at serving
+def train_fixed(logs: pd.DataFrame) -> lgb.LGBMClassifier:
+    return lgb.LGBMClassifier(n_estimators=500).fit(logs[FEATURES + ["position"]], logs["clicked"])
+
+
+def score_for_ranking(model: lgb.LGBMClassifier, candidates: pd.DataFrame) -> pd.Series:
+    x = candidates[FEATURES].assign(position=1)   # every candidate scored as if shown in slot 1
+    return pd.Series(model.predict_proba(x)[:, 1], index=candidates.index)
+```
+
+During training the `position` column absorbs the share of clicks explained by the slot, so the other features are left to explain quality; at serving every candidate gets the same position, so the slot cannot reorder them. This is the cheap version: it assumes the position effect is mostly separable from the item features, which a tree model does not guarantee. The stronger fix is inverse-propensity weighting with propensities estimated from a small slice of randomised traffic, which is what the walkthrough's Step 2 names.
+
 ---
 
 ## 11. Technologies & Tools
@@ -909,3 +938,34 @@ headroom    = P99 budget - end_to_end_P99
 - Model output: daily score distribution comparison; alert if shift > 2 std
 - Business: real-time watch time per session on 5-minute rolling window; rollback trigger: -3% for 30 minutes
 - Retraining: ranking model daily (scheduled); retrieval model weekly (scheduled) + triggered on PSI > 0.25
+
+**BROKEN → FIX: LambdaRank groups computed from unsorted impressions.** Step 4's LightGBM LambdaRank model learns from per-request lists, and LightGBM finds those lists only by position.
+
+```python
+import lightgbm as lgb
+import pandas as pd
+
+FEATURES: list[str] = [f"f{i}" for i in range(300)]   # the 300 ranking features
+
+
+# BROKEN: impressions in log (timestamp) order, group sizes from a sorted groupby
+def fit_broken(df: pd.DataFrame) -> lgb.LGBMRanker:
+    groups = df.groupby("request_id").size().to_numpy()   # sizes ordered by request_id...
+    ranker = lgb.LGBMRanker(objective="lambdarank", n_estimators=500, max_depth=7)
+    return ranker.fit(df[FEATURES], df["label"], group=groups)
+    # ...but LightGBM cuts the ROWS into consecutive chunks of those sizes, so each "query"
+    # mixes impressions from unrelated requests and the pairwise gradients compare strangers
+```
+
+```python
+# FIX: rows contiguous per request, sizes in the same order, integer relevance labels
+def fit_fixed(df: pd.DataFrame) -> lgb.LGBMRanker:
+    df = df.sort_values(["request_id", "position"], kind="stable").reset_index(drop=True)
+    groups = df.groupby("request_id", sort=False).size().to_numpy()
+    assert groups.sum() == len(df)
+    labels = (df["watch_time_ratio"] >= 0.3).astype(int)   # Step 2's positive threshold
+    ranker = lgb.LGBMRanker(objective="lambdarank", n_estimators=500, max_depth=7)
+    return ranker.fit(df[FEATURES], labels, group=groups)
+```
+
+Nothing errors in the broken version as long as the sizes sum to the row count, which they always do, so the only symptom is an NDCG@10 that never approaches the 0.65 target. LambdaRank also needs non-negative integer relevance grades, so the continuous `watch_time_ratio` is thresholded at the 0.3 from Step 2 (or bucketed into a few grades) before training.

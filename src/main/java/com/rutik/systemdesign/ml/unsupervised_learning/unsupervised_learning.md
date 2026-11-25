@@ -38,6 +38,17 @@ Key insight: the definition of "similar" is baked into the distance metric and a
 4. **Scale before you cluster** — unscaled features let high-magnitude variables dominate distance calculations.
 5. **Stochasticity** — k-means and t-SNE have random initializations; set `random_state` for reproducibility.
 
+**Principles 2 and 4 in numbers — which feature a Euclidean distance actually measures.** Two customers differ by 20 years of age and $1,000 of annual income; across the dataset age has a standard deviation of 12 years and income one of $30,000:
+
+```
+unscaled:      d = sqrt(20^2 + 1,000^2) = 1,000.2
+               age share of d^2 = 400 / 1,000,400 = 0.04%
+standardized:  d = sqrt((20/12)^2 + (1,000/30,000)^2) = sqrt(2.778 + 0.001) = 1.667
+               age share of d^2 = 2.778 / 2.779 = 99.96%
+```
+
+Before scaling, k-means clusters on income alone and age is ignored; after `StandardScaler` the same pair is far apart because of age, which matches the fact that 20 years is 1.7 standard deviations while $1,000 is 0.03. Neither result is "right" until you decide which differences should count; scaling makes that decision explicit instead of letting the units make it.
+
 ---
 
 ## 4. Types / Architectures / Strategies

@@ -867,6 +867,29 @@ A team built a credit risk model with features: total_credit_limit, credit_utili
 **Pitfall 6 — Using Lasso when features are correlated**
 Lasso has a tendency to arbitrarily select one feature from a group of correlated features and zero out the rest. This produces unstable feature selection — a different random seed drops a different feature. Use ElasticNet (l1_ratio=0.5 to 0.9) when you want sparsity but the features may be correlated.
 
+**Pitfall 1 as code: a ConvergenceWarning nobody reads.**
+
+```python
+# BROKEN: default max_iter=100 on unscaled features
+from sklearn.linear_model import LogisticRegression
+
+clf = LogisticRegression().fit(X, y)             # ConvergenceWarning in the log, coefficients unconverged
+```
+
+```python
+# FIX: scale, raise max_iter, and make the warning fatal in tests and CI
+import warnings
+
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+warnings.simplefilter("error", ConvergenceWarning)
+clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)).fit(X, y)
+```
+
+lbfgs stops after 100 iterations and returns whatever coefficients it reached, so the model predicts reasonably and the warning scrolls past in a training log. The coefficients are not the optimum, which matters as soon as anyone reads them as feature effects. Scaling makes the problem well conditioned so it converges quickly, and turning the warning into an error stops an unconverged model from shipping.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1032,3 +1055,39 @@ flowchart TD
 **Inference latency**: the entire pipeline (feature engineering + scaler transform + logistic regression forward pass) runs in 1.8ms on a single CPU core. Deployed as a FastAPI microservice. The simplicity of logistic regression was decisive — no GPU, no model server, no batching complexity.
 
 **Lesson**: the interpretability constraint eliminated gradient boosting (which would have scored AUC 0.91 but requires SHAP for post-hoc explanation, which does not satisfy the regulation). Logistic regression at AUC 0.87 with native coefficient interpretability was the correct production choice.
+
+**BROKEN → FIX: target-encoding `region` with the training rows' own labels.** The pipeline target-encodes 50 states for a 3% fraud rate, which is where this leak hides.
+
+```python
+# BROKEN: per-region fraud rate computed on the training set, mapped back onto the same rows
+region_rate = train.groupby("region")["is_fraud"].mean()
+train["region_te"] = train["region"].map(region_rate)
+# in a region with 40 claims, one fraud raises that region's encoding by 1/40 = 0.025 for ALL its rows,
+# including the fraudulent claim itself: the model learns to trust region_te more than it should
+```
+
+```python
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, TargetEncoder
+
+NUMERIC = ["log_claim_amount", "days_since_policy_start", "prior_claims_count", "filing_delay_days"]
+
+# FIX: TargetEncoder cross-fits inside fit_transform, so no row is encoded with its own label
+pre = ColumnTransformer([
+    ("region", make_pipeline(TargetEncoder(target_type="binary", cv=5, random_state=42),
+                             StandardScaler()), ["region"]),
+    ("claim_type", OneHotEncoder(handle_unknown="ignore"), ["claim_type"]),
+    ("num", StandardScaler(), NUMERIC),
+])
+model = Pipeline([("pre", pre),
+                  ("lr", LogisticRegression(C=0.01, class_weight="balanced", max_iter=1000))])
+model.fit(train[["region", "claim_type", *NUMERIC]], train["is_fraud"])
+```
+
+scikit-learn's `TargetEncoder.fit_transform` encodes each training row with statistics from the other
+folds, while `transform` at inference uses the full-data encoding; that asymmetry is the leak fix, and it is
+why the encoder must sit inside the `Pipeline` rather than be applied to the DataFrame beforehand. It also
+shrinks small regions toward the global rate, which matters when some of the 50 states have only a few
+dozen claims. Expect the coefficient on `region` to fall after the fix: the old one was partly the label.

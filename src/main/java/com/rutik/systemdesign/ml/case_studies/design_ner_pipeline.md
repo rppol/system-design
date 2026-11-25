@@ -1,8 +1,25 @@
 # Design a Named Entity Recognition (NER) Pipeline
 
+## Intuition
+
 > Like a highlighter that learned to read — the system scans unstructured text and marks every person, organization, location, date, and domain-specific entity without being told where to look.
 
 **Key insight:** NER is token classification, not sequence classification. Every input token gets a label, and the label of one token constrains what labels its neighbors can have — which is why a CRF layer on top of BERT outperforms a plain softmax head.
+
+Mental model: a tagger plus three pieces of plumbing that decide whether its output is usable. The **tagger** (BERT + CRF) labels tokens. The **alignment layer** maps subword tokens and sliding windows back to character offsets in the original text, and most production NER bugs live here, not in the model (§4.2, §4.5). The **operating point** decides which spans are emitted and which go to a human, and it must differ by entity type because a missed social-security number and a missed city name do not cost the same (§4.6).
+
+Why this system exists: 5M documents a day cannot be read by people, and every downstream consumer (search filters, compliance redaction, knowledge-graph population, the bridge-entity step in [Question Answering](design_question_answering_system.md)) needs structured entities with exact offsets. A wrong offset breaks redaction even when the label is right.
+
+This study owns **span extraction**: tagging, alignment, long-document merge, per-type thresholds and the active-learning loop. It does not repeat [NLP Classification Pipeline](design_nlp_classification_pipeline.md), which labels whole documents, or [Document AI Extraction](design_document_ai_extraction.md), which owns layout-aware extraction from scanned forms. Its cross-cutting references are [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md) for per-type operating points, [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md) for entity drift, [Responsible AI, Fairness and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md) for PII handling, [Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) for leak-free training snapshots, and [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md) for shadow and A/B rollout.
+
+| Term | Meaning in this study |
+|---|---|
+| BIO | Begin / Inside / Outside tags per token (§4.1) |
+| Entity-level F1 | F1 where a span counts only if start, end and type all match (`seqeval`) |
+| Span marginal | The probability of one span's tag sequence summed over all paths (forward-backward), used as span confidence |
+| Window context | How far a token sits from the edge of its sliding window; predictions near an edge see less context (§4.5) |
+| Operating point | The confidence threshold chosen per entity type for a target precision or recall (§4.6) |
+| Snapshot | A frozen, dated training set; the eval set is excluded from every snapshot by document id (Pitfall 8) |
 
 ---
 
@@ -500,6 +517,154 @@ def enumerate_candidate_spans(
     return candidates
 ```
 
+### 4.5 Merging Spans Across Sliding Windows
+
+A 4K-token document runs through BERT as overlapping 512-token windows (§5 uses stride 256). Every entity near a window edge is predicted twice, once with too little context, and an entity that straddles an edge is predicted as two truncated halves. Pitfall 5 is what exact-match deduplication does with that: both halves survive. The rule that works is the one used for SQuAD-style long-context readers: **trust the prediction made from the window where the span has the most context on both sides**, and drop any span that touches an interior window edge, because the neighbouring window holds the complete version. That requires the overlap to be longer than the longest entity.
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Span:
+    start: int          # character offset in the full document
+    end: int            # exclusive
+    label: str
+    confidence: float
+    window_id: int
+
+
+# BROKEN: exact-match dedupe. Truncated halves and conflicting labels in the
+# overlap all survive, so one company becomes three entities.
+def merge_exact_dedupe(spans: list[Span]) -> list[Span]:
+    seen: set[tuple[int, int, str]] = set()
+    out = []
+    for s in spans:
+        key = (s.start, s.end, s.label)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return sorted(out, key=lambda s: (s.start, s.end))
+
+
+# FIX: drop spans cut by an interior window edge, then resolve overlaps in
+# favour of the prediction with the most context on its weaker side.
+def merge_max_context(spans: list[Span], windows: dict[int, tuple[int, int]],
+                      doc_len: int) -> list[Span]:
+    def is_cut(s: Span) -> bool:
+        ws, we = windows[s.window_id]
+        return (s.start <= ws and ws > 0) or (s.end >= we and we < doc_len)
+
+    def context(s: Span) -> int:
+        ws, we = windows[s.window_id]
+        return min(s.start - ws, we - s.end)
+
+    candidates = sorted((s for s in spans if not is_cut(s)),
+                        key=lambda s: (-context(s), -s.confidence))
+    kept: list[Span] = []
+    for s in candidates:
+        if all(s.end <= k.start or s.start >= k.end for k in kept):
+            kept.append(s)
+    return sorted(kept, key=lambda s: s.start)
+
+
+if __name__ == "__main__":
+    windows = {0: (0, 2_000), 1: (1_000, 3_000), 2: (2_000, 4_000)}
+    predictions = [
+        Span(1_980, 2_000, "ORG", 0.88, 0),    # "International Busine" cut at window 0's end
+        Span(1_980, 2_023, "ORG", 0.97, 1),    # full "International Business Machines Corporation"
+        Span(2_000, 2_023, "ORG", 0.71, 2),    # tail cut at window 2's start
+        Span(2_950, 2_963, "PER", 0.62, 1),    # "Watson Health" 37 chars from window 1's end
+        Span(2_950, 2_963, "ORG", 0.91, 2),    # same text, 950 chars of context in window 2
+    ]
+    print("BROKEN:", [(s.start, s.end, s.label) for s in merge_exact_dedupe(predictions)])
+    print("FIX:   ", [(s.start, s.end, s.label)
+                      for s in merge_max_context(predictions, windows, doc_len=4_000)])
+```
+
+The broken merge returns five spans for two entities; the fixed merge returns `(1980, 2023, ORG)` and `(2950, 2963, ORG)`. Two production details matter. The windows are defined in tokens but the spans in characters, so the window table must store each window's character range from the tokenizer's `offset_mapping`, and pinning the tokenizer version is part of the contract (Runbook 4). And the `doc_len` edge cases are real: a span at the very start of the document touches window 0's left edge legitimately and must not be dropped, which is what the `ws > 0` and `we < doc_len` guards encode.
+
+### 4.6 Per-Type Operating Points and a Second Detector for PII
+
+The pipeline gates spans with one confidence threshold (0.75 in the runbooks). One number cannot serve every entity type: for a search facet, a false ORG is the expensive error, so ORG wants a **precision** target; for compliance redaction, a missed social-security or card number is the expensive error, so those types want a **recall** target, and a model alone rarely reaches 99% recall on them. The fix has two parts: an operating point per type fitted on dev data, and a deterministic second detector (pattern plus checksum) unioned with the model for the types that have one.
+
+```python
+from __future__ import annotations
+
+import re
+
+import numpy as np
+
+CARD_RE = re.compile(r"\b\d(?:[ -]?\d){12,18}\b")      # 13-19 digits, spaces or dashes allowed
+
+
+def luhn_valid(number: str) -> bool:
+    digits = [int(c) for c in number if c.isdigit()]
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def card_spans(text: str) -> list[tuple[int, int, str]]:
+    """Pattern + checksum detector: high recall, and Luhn removes most false hits."""
+    return [(m.start(), m.end(), "CREDIT_CARD") for m in CARD_RE.finditer(text)
+            if luhn_valid(m.group())]
+
+
+def threshold_for_recall(conf: np.ndarray, is_true: np.ndarray, target: float) -> float:
+    pos = np.sort(conf[is_true == 1])[::-1]
+    return float(pos[int(np.ceil(target * pos.size)) - 1]) if pos.size else 0.0
+
+
+def threshold_for_precision(conf: np.ndarray, is_true: np.ndarray, target: float) -> float:
+    order = np.argsort(-conf)
+    precision = np.cumsum(is_true[order]) / np.arange(1, len(order) + 1)
+    ok = np.flatnonzero(precision >= target)
+    return float(conf[order][ok.max()]) if ok.size else 1.01
+
+
+POLICY: dict[str, tuple[str, float]] = {
+    "SSN": ("recall", 0.99), "PER": ("recall", 0.97),             # redaction types
+    "ORG": ("precision", 0.92), "LOC": ("precision", 0.92),       # search-facet types
+}
+
+
+def fit_operating_points(dev: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict[str, float]:
+    points = {}
+    for label, (conf, is_true) in dev.items():
+        kind, target = POLICY[label]
+        fit = threshold_for_recall if kind == "recall" else threshold_for_precision
+        points[label] = fit(conf, is_true, target)
+    return points
+
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(5)
+    dev = {}
+    for label, (a_true, a_false) in {"SSN": (8, 3), "PER": (9, 3), "ORG": (9, 4), "LOC": (10, 4)}.items():
+        conf = np.concatenate([rng.beta(a_true, 2, 900), rng.beta(2, a_false, 300)])
+        is_true = np.concatenate([np.ones(900), np.zeros(300)])
+        dev[label] = (conf, is_true)
+    points = fit_operating_points(dev)
+    for label, (conf, is_true) in dev.items():
+        r_global = float(np.mean(conf[is_true == 1] >= 0.75))           # BROKEN: one threshold
+        r_typed = float(np.mean(conf[is_true == 1] >= points[label]))  # FIX: per type
+        print(f"{label}: recall@0.75 {r_global:.1%}  threshold {points[label]:.2f} -> recall {r_typed:.1%}")
+    text = "Card 4111 1111 1111 1111 was charged; order ref 1234 5678 9012 3456."
+    print(card_spans(text))   # only the Luhn-valid test card number is returned
+```
+
+The order reference `1234 5678 9012 3456` matches the pattern but fails the checksum, so only the card number is redacted. The price of recall targets is precision: at a 0.99 recall target the SSN threshold falls low enough that more non-SSN spans are redacted, which for redaction is the right side to err on and for a search facet would not be. Each type's threshold is refitted when the model changes and monitored per type, never as one aggregate; the method is in [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md), and the reason to treat PII misses as a governance issue, not a metric, is in [Responsible AI, Fairness and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md). Presidio (§6) packages the same two-detector shape as an open-source library.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -511,6 +676,10 @@ def enumerate_candidate_spans(
 | Long-document handling | Sliding window (stride=256) | Hierarchical BERT, Longformer | Sliding window reuses BERT-base weights; Longformer improves cross-chunk entities but requires 10× training cost |
 | Active learning strategy | Uncertainty (min confidence) | Random, diversity (coreset) | Uncertainty reaches a given F1 on a materially smaller annotation budget than random (measure the ratio on your own corpus); coreset needed only when class imbalance is severe |
 | Subword label assignment | First subword gets word label | Average logits across subwords | First-subword convention is de facto standard; averaging adds complexity without F1 gain in practice |
+| Window merge | Drop edge-cut spans, keep max-context prediction (§4.5) | Exact-match dedupe; keep highest confidence | Confidence does not track context: a prediction 20 characters from a window edge can be confident and wrong. Context on both sides is what the model was trained with, so it decides; exact dedupe keeps truncated halves |
+| Emission threshold | Per-type operating point: recall targets for PII, precision targets for facets (§4.6) | One global threshold tuned on micro-F1 | Micro-F1 is dominated by frequent types (PER, ORG), so the global threshold is wrong for rare, high-cost types such as SSN |
+| PII detection | Model unioned with pattern + checksum detectors | Model only; regex only | The model handles names and free-form identifiers; checksums give near-certain recall on structured numbers and reject look-alikes such as order references |
+| Zero-shot new types | Span-based generalist model (GLiNER) as a bootstrap labeler | Fine-tune immediately; prompt an LLM | A compact encoder extracts arbitrary types in parallel at a fraction of LLM cost; its spans seed the annotation queue until 500+ gold labels allow a fine-tune |
 
 **Comparison: CRF vs softmax head** — the accuracy rows below are illustrative in-house
 measurements on this pipeline's own corpora, not published benchmark results. The one published
@@ -538,6 +707,21 @@ token-classification (softmax) head**, so do not assume a CRF is what gets you t
 **Document-scale intelligence/legal NER (pattern):** Corpora of 10M+ documents with 20+ entity types (CASE_NUMBER, STATUTE, LEGAL_ENTITY) use sliding-window BERT with cross-chunk entity merging, then post-NER coreference chaining across sentences. Vendors in this space (Palantir and others) do not publish per-entity F1 on their customers' corpora, so plan to build your own golden set rather than shopping for a headline number.
 
 **spaCy's transformer pipeline (`spacy-transformers`):** Production-ready transformer NER wired into the spaCy pipeline. Their `en_core_web_trf` model uses a **roberta-base** backbone (not BERT) and reports **NER F = 0.899 (P 0.897 / R 0.901) on OntoNotes 5** in the published model metadata, with full subword alignment support.
+
+**BioBERT (Lee et al., Korea University and NAVER, Bioinformatics 2020).** The reference result for the domain-specific encoder row in §11. BioBERT continues BERT's pre-training on large biomedical corpora with almost the same architecture, and reports gains over previous state of the art of 0.62% F1 on biomedical NER, 2.80% F1 on relation extraction and 12.24% MRR on biomedical QA, with the weights released openly. The honest reading for this pipeline: on NER the domain pre-training gain is under one F1 point over prior state of the art, far smaller than the gain from fine-tuning on in-domain labels (§4.3). Pre-train for vocabulary coverage; label for accuracy.
+
+**GLiNER (Zaratiana, Tomeh, Holat, Charnois, arXiv 2311.08526, 2023).** A compact NER model built on a bidirectional transformer encoder that extracts *arbitrary* entity types named at inference time, in parallel rather than token by token as an LLM generates. The authors report it outperforming both ChatGPT and fine-tuned LLMs in zero-shot evaluation on several NER benchmarks. In this design it fills the gap the weekly retrain cannot: when a new type appears (a new product line, a new regulation code), it produces candidate spans on day one for the annotation queue, and the supervised BERT-CRF takes over once enough gold labels exist.
+
+**Presidio (Data Privacy Stack; open-sourced by Microsoft).** An open-source PII identification and anonymization library, now a community-owned project, whose recognizers combine named entity recognition, regular expressions, rule-based logic and checksums with surrounding context, across text, images and structured data. It is the packaged form of §4.6's two-detector design. Its own documentation warns that automated detection cannot guarantee finding all sensitive information and that additional protections are needed, which is exactly why §4.6 sets recall targets per type and keeps a human review queue for low-confidence PII.
+
+| Source | What this study borrows | Primary source |
+|---|---|---|
+| Google (BERT) | 92.4 CoNLL-2003 test F1 with a softmax head | Devlin et al., NAACL 2019 |
+| Korea University / NAVER | Domain pre-training gain is small on NER | Lee et al., BioBERT |
+| Zaratiana et al. | Zero-shot generalist NER as a bootstrap labeler | GLiNER, arXiv 2311.08526 |
+| Data Privacy Stack (Presidio) | NER + regex + checksum PII recognizers | Presidio documentation |
+| Explosion (spaCy) | Transformer NER with subword alignment | `en_core_web_trf` metadata |
+| AWS (Comprehend Custom) | Minimum training data for custom entity types | AWS documentation |
 
 ---
 
@@ -651,6 +835,18 @@ Key metrics:
 - Mitigation: enable overlap deduplication in API response layer (filter identical char offsets)
 - Resolution: pin tokenizer version; add integration test covering 600-token documents
 
+**Runbook 5 — PII recall below target on the weekly audit**
+- Symptom: audit of 1,000 sampled redacted documents finds SSN or card recall below 0.99
+- Diagnosis: check which detector missed (model, pattern, or both); new formats (masked "XXX-XX-1234", numbers split by line breaks) defeat the pattern, new context defeats the model
+- Mitigation: lower that type's threshold to restore recall on the audit sample; route all documents from the affected source to human review
+- Resolution: add the new format to the pattern detector, add the missed examples to the next fine-tune, refit the per-type operating points (§4.6)
+
+### (d) Release Gates for the Weekly Retrain
+- **Snapshot integrity:** the training snapshot is built as of a cutoff date and excludes every document id in the golden eval set, including near-duplicates by MinHash; the point-in-time discipline is the one in [Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md).
+- **Per-type quality:** entity-level F1 per type within 1 point of the champion, and recall at the fitted operating point for every PII type at or above target. Aggregate F1 alone never promotes a model.
+- **Drift check:** PSI of predicted entity-type frequencies on the last 7 days of traffic against the snapshot, per [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md).
+- **Shadow run:** 48 hours on mirrored traffic, comparing span-level disagreements with the champion by type and source system before any traffic shift, as in [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md). Downstream consumers (search facets, redaction) see the candidate's output only after the disagreement sample is reviewed.
+
 ---
 
 ## 9. Common Pitfalls & War Stories
@@ -672,6 +868,12 @@ A company name "International Business Machines Corporation" spanning a 512-toke
 
 **Pitfall 6 — Domain shift after product rebranding**
 A media monitoring NER system was trained when "Twitter" was the brand. After rebranding to "X Corp", entity F1 for COMPANY dropped from 0.91 to 0.74 in two weeks because "X" appeared everywhere as a pronoun/variable and the model was confused. The drift was detected via [../cross_cutting/drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md) PSI monitoring. Fix: collect 200 new labeled examples covering "X Corp", "xAI", "X (formerly Twitter)"; retrain within 48 hours. Impact: 4 days before detection (PSI threshold too high for sudden shifts); threshold now tuned for rapid brand-change events.
+
+**Pitfall 7 — A global threshold that let card numbers through redaction**
+(Illustrative composite; the mechanism is §4.6.) A support-ticket redaction job used the pipeline's single 0.75 threshold for every type. It had been tuned on micro-F1, which is dominated by PER and ORG. Card numbers written with unusual separators ("4111.1111.1111.1111") or split across a line break scored 0.55-0.70 and were emitted unredacted into an analytics warehouse with 140 readers. An audit found 2,300 unredacted card numbers across 6 weeks of tickets; the remediation (purging and re-processing 1.9M tickets, notifying the payment-security team, and a scope review) took 3 engineer-weeks. Fix: recall-targeted per-type thresholds plus the pattern-and-Luhn detector, with the separator set widened to `[ .-]`. Lesson: for redaction, the cost of a miss is set by the type, so the threshold must be too.
+
+**Pitfall 8 — Active learning that pulled the eval set into training**
+(Illustrative composite.) The uncertainty sampler (§4.3) selected its batch from all unlabeled traffic, and the golden eval set had been sampled from the same traffic two months earlier. Over 10 weekly cycles, 412 of the 2,000 eval documents (or near-duplicates differing only in signatures and timestamps) were annotated and added to training. Reported entity F1 climbed from 0.88 to 0.93 while the independent quarterly audit stayed at 0.88. Two model promotions were approved on the inflated number, one of which regressed LAW recall by 4 points in production. Fix: exclude eval document ids and MinHash near-duplicates from every training snapshot, and refresh 25% of the eval set each quarter from traffic after the snapshot cutoff. Lesson: an active-learning loop is a data pipeline, and it leaks like one.
 
 ---
 
@@ -717,36 +919,81 @@ To hit 2,000 docs/min = 33 docs/sec:
   the confidence threshold that gates the queue is a budget decision, not just a
   quality knob
 
+**What per-type operating points do to the review queue (§4.6):**
+```
+Assumption: 5M docs/day, 1.2 PII-type spans/doc on average = 6M PII spans/day
+Global threshold 0.75: assume 2% of PII spans fall in the review band 0.60-0.75
+  -> 120K spans/day to review
+Recall-targeted thresholds push the PII review band lower (0.40-0.60) and wider:
+  assume 3.5% of PII spans -> 210K spans/day
+At $0.125/span: +90K spans x $0.125 = +$11,250/day ≈ +$4.1M/year
+That is unaffordable as-is, so split the queue:
+  - pattern + Luhn hits are auto-redacted (no review); assume they are 60% of the band
+  - review only model-only PII spans in the band: ~84K spans/day ≈ $10,500/day
+  - sample 1% of the ~126K auto-redacted spans for audit: ~1.3K spans/day
+Net: ~85K reviewed spans/day against 120K before, with recall targets met.
+The point: recall targets are paid for in review volume, and a deterministic
+second detector is what keeps that bill flat.
+```
+
+**Long-document merge cost (§4.5):** stride 256 on 512-token windows runs every token through BERT about twice, so a 4K-token document costs ceil((4,096 - 512) / 256) + 1 = 15 windows instead of 8 non-overlapping ones, and an 800-token average document costs 2. At 139 batch docs/s that is roughly 300 windows/s against ~640 windows/s per A10G, so the 3 batch GPUs in §2 still hold; size them in windows, not documents, whenever the length mix shifts.
+
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: What is the BIO tagging scheme and why is it the standard for NER?**
+**Short:** BIO tags each token as the beginning of an entity, inside one, or outside any, which handles multi-token entities with only 2K+1 labels for K types.
 BIO assigns every token one of three roles: B-TYPE (first token of an entity), I-TYPE (continuation), or O (non-entity). It is the standard because it is minimal (O(2K+1) tags for K entity types), handles multi-token entities naturally, and is compatible with both CRF and softmax decoding. BIOES adds Ending (E-) and Single-token (S-) tags for marginally better boundary detection but at the cost of 2K additional transitions in the CRF.
 
 **Q: Why add a CRF layer on top of BERT for NER?**
+**Short:** A CRF learns tag-transition scores and decodes the best whole sequence with Viterbi, so it never emits invalid sequences such as I-ORG after O; F1 gains vary by corpus.
 A plain softmax head treats each token's label independently and can emit globally invalid sequences (I-ORG after O). The CRF layer adds a trainable transition matrix over tag pairs and uses Viterbi decoding to find the globally-optimal label sequence given BERT's contextual emissions. The cost is 3ms additional latency and a 23×23 transition matrix (~500 parameters). The guaranteed benefit is structural — zero invalid tag sequences — while the F1 gain is corpus-dependent: near-zero on clean news text like CoNLL-2003, larger on domain corpora with ambiguous multi-token boundaries.
 
 **Q: How do you handle BERT's 512-token limit for long documents?**
+**Short:** Run overlapping sliding windows, merge spans from the overlaps keeping the best-context prediction, or move to a long-context encoder at higher latency.
 Sliding window with stride: split the document into overlapping chunks (e.g., stride=256 means 256-token overlap between adjacent chunks). Independently run NER on each chunk, then merge results: for spans appearing in the overlap region of two chunks, keep the one with higher confidence. Overlap prevents missing entities that straddle chunk boundaries. For very long documents (5K+ tokens), Longformer or BigBird can process up to 4,096 tokens with sparse attention at 4× the latency.
 
 **Q: What is the subword alignment problem and how do you solve it?**
+**Short:** Word labels must map to WordPiece subwords; give the first subword the word's label and ignore or I-tag the rest, using word_ids() from the fast tokenizer.
 BERT's WordPiece splits words like "Schumacher" into ["Sch", "##um", "##acher"]. Word-level NER labels apply to the whole word, but BERT operates on subwords. The standard fix is to assign the word's label to the first subword and ignore (or assign I-TYPE to) subsequent subwords. `BertTokenizerFast` provides `word_ids()` to map each token back to its source word, enabling this alignment. Assigning the same B-label to all subwords is a common bug that teaches the CRF impossible transitions.
 
 **Q: How does uncertainty sampling for active learning work in NER?**
+**Short:** Send the documents the model is least sure about to annotators, scoring by the least confident span rather than whole-sequence probability, which hides one hard entity among many easy ones.
 Rather than annotating random documents, select documents where the model is least confident. For NER, confidence can be measured at the sequence level (CRF Viterbi path probability) or at the span level (marginal probability of the most uncertain span in the document). Span-level uncertainty is more informative because a long document with one difficult entity and 50 easy entities has high sequence-level confidence but contains genuinely novel examples. In practice, uncertainty sampling reduces annotation budget by 30–50% vs random to reach the same F1 milestone.
 
 **Q: How do you evaluate NER models and what gotchas exist?**
+**Short:** Use entity-level F1 with exact span and type match, report it per type, and never trust token accuracy, which rewards predicting O everywhere on sparse corpora.
 Use entity-level F1 (via `seqeval`), not token-level accuracy. Token accuracy is misleading: a model that predicts all O gets 97% token accuracy but 0% entity F1 on sparse corpora. Entity-level F1 requires exact span match (start char, end char, AND entity type must all match) — a predicted "John Smith" tagged as PER-B I-B (wrong second token) counts as a false positive and a false negative. Report type-level breakdown to surface weak entity types; aggregate F1 hides per-type failures.
 
 **Q: When would you use a span-based model instead of BIO tagging?**
+**Short:** Use span-based scoring when entities nest or overlap, since BIO allows one label per token; cap span length because candidate spans grow quadratically.
 BIO tagging is flat: each token gets exactly one label. Span-based models enumerate all (start, end) pairs up to a maximum length, score each pair for entity type, and allow overlapping predictions. Span-based is required for nested NER (e.g., "Apple [ORG] executive [TITLE] Tim Cook [PER]" — "Tim Cook" is nested inside the longer span). The cost is O(n²) candidate spans per sentence vs O(n) for BIO, so max span length is typically capped at 10 to keep inference tractable.
 
 **Q: How do you handle domain shift and entity type drift in production?**
+**Short:** Watch PSI on predicted entity-type frequencies and rolling F1 on an annotated sample, then route more spans to review, label the drifted type and retrain quickly.
 Monitor two signals: (1) PSI (Population Stability Index) on the input text's entity-type frequency distribution — a new entity class appearing frequently (e.g., "X Corp" post-Twitter rebrand) shifts the distribution; (2) rolling F1 on a held-out annotated sample. When PSI > 0.2 or F1 drops > 2%, trigger active learning: lower the confidence threshold to route more predictions to human review, collect 200–500 new examples for the drifted entity type, and retrain within 24 hours. See [../cross_cutting/drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md).
 
 **Q: How would you adapt this pipeline for multilingual NER?**
+**Short:** Swap in a multilingual encoder such as XLM-RoBERTa and use cross-lingual transfer, fine-tuning on high-resource languages plus a few hundred target-language examples.
 Replace BERT-base-uncased with `xlm-roberta-base` (trained on 100 languages via masked LM). XLM-RoBERTa uses SentencePiece tokenization (language-agnostic) instead of WordPiece. For low-resource languages, use cross-lingual transfer: train on high-resource languages (English, Spanish, German) and zero-shot or few-shot transfer to target language. Practical gain: English + cross-lingual fine-tuning on 500 Arabic examples achieves ~0.76 F1 on Arabic NER vs 0.62 for English-only transfer.
 
 **Q: What is the trade-off between BERT-base, BERT-large, and domain-specific models?**
+**Short:** BERT-large adds about 0.4 F1 on CoNLL-2003 for roughly 3x latency; a domain-pretrained base model is the usual choice for specialist text under a strict SLO.
 BERT-base (110M parameters): 92.4 CoNLL-2003 test F1 as published, 40ms P95 latency, fits in 4GB GPU memory. BERT-large (340M parameters): 92.8 test F1 — only +0.4 — at 110ms P95 latency (3× slower) and ~12GB GPU. Domain-specific (BioBERT, LegalBERT — same size as BERT-base): 91–95% F1 on domain text but 80–85% F1 on general text. Decision matrix: for general NER at scale, BERT-base with fine-tuning; for medical/legal/financial at strict SLO, domain-specific BERT-base; for maximum accuracy where latency > 100ms is acceptable, BERT-large or domain-specific BERT-large.
+
+**Q: How do you merge entity predictions from overlapping sliding windows?**
+**Short:** Drop spans cut by an interior window edge and keep the prediction with the most context on its weaker side; exact-match dedupe keeps truncated halves and conflicts.
+Drop any span that touches an interior window edge, then resolve overlaps by keeping the prediction made with the most context on its weaker side. Exact-match deduplication keeps both truncated halves of an entity that straddles a boundary and both labels of a conflicting prediction, so one company can become three entities (§4.5). Make the overlap longer than the longest expected entity, store each window's character range from the tokenizer's offset mapping, and pin the tokenizer version so those offsets stay stable.
+
+**Q: Why should a PII redaction pipeline use different thresholds per entity type?**
+**Short:** A miss costs more for some types than others, so fit recall targets for PII and precision targets for facets, and add a pattern-plus-checksum detector for numbers.
+Because the cost of a miss differs by type, and one threshold tuned on micro-F1 is set by the frequent, cheap types. Fit a recall target (for example 0.99) for SSN and card numbers and a precision target for search-facet types such as ORG, then union the model with a pattern-plus-checksum detector, since Luhn validation catches card numbers the model scores low and rejects look-alike order references (§4.6). Pitfall 7 shows the cost of one global 0.75 threshold: 2,300 card numbers in an analytics warehouse.
+
+**Q: How can an active-learning loop inflate your reported F1?**
+**Short:** It can annotate eval documents or near-duplicates into training; exclude eval ids and MinHash near-duplicates from snapshots and refresh the eval set after the cutoff.
+By selecting documents for annotation from the same traffic the eval set came from, so eval documents and their near-duplicates end up in training. Reported F1 then rises while independent audits stay flat; Pitfall 8 shows 0.88 reported as 0.93 after 10 cycles. Exclude eval document ids and MinHash near-duplicates from every training snapshot, build snapshots as of a cutoff date, and refresh part of the eval set from traffic after that cutoff each quarter.
+
+**Q: A new entity type appears in traffic. How do you start extracting it before you have labels?**
+**Short:** Bootstrap with a zero-shot extractor such as GLiNER feeding the annotation queue, then fine-tune the supervised tagger once about 500 gold spans exist.
+Use a zero-shot generalist extractor such as GLiNER, which names the type at inference time, to produce candidate spans on day one, and route them into the annotation queue rather than to consumers. Once 500 or more gold spans exist, fine-tune the supervised BERT-CRF with the new type and fit its operating point. An LLM prompt can do the same bootstrap but at far higher cost per document; at 5M documents a day the compact encoder is the practical choice.

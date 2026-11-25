@@ -706,6 +706,26 @@ A naively implemented DeepLab trained on 1024x2048 Cityscapes images with batch 
 **Pitfall 5: Mask R-CNN mask head misalignment**
 Mask R-CNN predicts a binary mask for each class at 28x28 resolution, then bilinearly upsamples to the RoI size. A bug in the upsampling code caused a half-pixel offset between the mask and the actual object — visible as thin sliver misses at object boundaries. Fix: use `align_corners=False` in `F.interpolate` and test with pixel-level IoU overlays during debugging.
 
+**Pitfall 1 as code: boundary pixels relabelled instead of ignored.**
+
+```python
+# BROKEN: "fix" the CUDA assert on label 255 by calling boundaries background
+import torch.nn.functional as F
+
+target[target == 255] = 0                       # 0 = background in VOC
+loss = F.cross_entropy(logits, target)          # logits [B, 21, H, W], target [B, H, W]
+```
+
+```python
+# FIX: exclude void pixels from the loss (and from the mIoU confusion matrix)
+loss = F.cross_entropy(logits, target, ignore_index=255)
+valid = target != 255
+pred = logits.argmax(1)
+conf = torch.bincount(target[valid] * 21 + pred[valid], minlength=21 * 21).view(21, 21)
+```
+
+Label 255 outside the 21 classes makes `cross_entropy` fail with a device-side assert, and the quick remap to 0 makes the error go away. It also teaches the model that every object edge is background, so masks erode by a few pixels everywhere and boundary IoU falls while the loss curve looks normal. `ignore_index=255` removes those pixels from both the loss and the mean.
+
 ---
 
 ## 11. Technologies & Tools
@@ -727,8 +747,8 @@ Mask R-CNN predicts a binary mask for each class at 28x28 resolution, then bilin
 
 ## 12. Interview Questions with Answers
 
-**Q: What is the difference between semantic and instance segmentation?**
-**Short:** Semantic segmentation labels every pixel by class only, while instance segmentation assigns each detected object instance its own separate mask.
+**Q: How do semantic, instance and panoptic segmentation differ in what they label?**
+**Short:** Semantic labels every pixel by class only, instance gives each countable object its own mask, and panoptic combines both for things and stuff.
 Semantic segmentation assigns a single class label to every pixel but treats all instances of a class identically — two adjacent cars are both labeled "car" with no distinction. Instance segmentation gives each detected object instance a unique binary mask in addition to a class label, so two cars get separate masks. Panoptic segmentation combines both: instance masks for countable "things" (car, person) and semantic labels for uncountable "stuff" (sky, road).
 
 **Q: What is mIoU and how is it computed?**
@@ -831,3 +851,32 @@ Sliding-window inference runs the model on overlapping crops of a large image an
 **Fix**: replaced watershed with a distance transform + H-maxima local peaks approach. Predicted the distance to the nearest boundary as an additional output channel. Used distance map peaks as watershed seeds. Mask AP@0.5 improved to 0.82.
 
 **Production deployment**: model runs on CPU (no GPU at lab workstations) with batch inference on patch tiles. TorchScript export + torch.jit.optimize_for_inference reduces per-patch latency from 850ms to 420ms on Intel Xeon. Full slide analysis (100k+ patches per slide) is parallelized across 8 CPU cores using Python multiprocessing, processing a full slide in ~3 minutes.
+
+**BROKEN → FIX: where the watershed seeds come from.** The merged-nuclei problem above is a seeding bug, and the fix is a few lines.
+
+```python
+import numpy as np
+from scipy import ndimage as ndi
+from skimage.segmentation import watershed
+
+
+# BROKEN: one seed per connected component of the thresholded foreground
+def instances_broken(prob_nucleus: np.ndarray) -> np.ndarray:
+    fg = prob_nucleus > 0.5
+    markers, _ = ndi.label(fg)                  # two touching nuclei = one component = one seed
+    return watershed(-prob_nucleus, markers, mask=fg)
+```
+
+```python
+from skimage.morphology import h_maxima
+
+
+# FIX: one seed per peak of the PREDICTED distance-to-boundary map
+def instances_fixed(prob_nucleus: np.ndarray, dist_pred: np.ndarray, h: float = 2.0) -> np.ndarray:
+    fg = prob_nucleus > 0.5
+    peaks = h_maxima(dist_pred * fg, h)          # a peak must rise h pixels above its surroundings
+    markers, _ = ndi.label(peaks)                # one marker per nucleus centre
+    return watershed(-dist_pred, markers, mask=fg)
+```
+
+Two nuclei that touch form one blob in the foreground mask, so the broken version can only ever return one instance for them; the distance map has a separate peak at each nucleus centre, and `h` suppresses the small spurious peaks that otherwise split one elongated nucleus in two. This is the change that took mask AP@0.5 from 0.74 to 0.82; tune `h` on validation slides, because it trades over-segmentation (small `h`) against merges (large `h`).

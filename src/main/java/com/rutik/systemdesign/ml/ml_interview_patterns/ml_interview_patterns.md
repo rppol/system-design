@@ -878,6 +878,24 @@ A time-series churn model used StratifiedKFold (random split). Offline AUC: 0.87
 **Pitfall 6 — Stopping at model training:**
 A team built and trained an excellent model but did not set up monitoring. Three months later, a feature pipeline schema change dropped one high-importance feature silently (it became all-zeros). The model's AUC degraded from 0.88 to 0.73 over 6 weeks before a business stakeholder noticed conversion declining. Fix: monitor feature distribution (PSI) daily, model AUC on a held-out labeled sample weekly, output distribution (KS test) daily. Alert threshold: PSI > 0.2 for any top-10 feature.
 
+**Pitfall 5 as code: shuffled K-fold on time-ordered data.**
+
+```python
+# BROKEN: future rows train the model that is scored on the past
+from sklearn.model_selection import KFold, cross_val_score
+
+scores = cross_val_score(model, X, y, cv=KFold(5, shuffle=True, random_state=0), scoring="roc_auc")
+```
+
+```python
+# FIX: rows sorted by time; each fold trains on the past and validates on the future
+from sklearn.model_selection import TimeSeriesSplit
+
+scores = cross_val_score(model, X, y, cv=TimeSeriesSplit(n_splits=5, gap=7), scoring="roc_auc")
+```
+
+The shuffled folds give a higher, stable score, which is exactly what makes them dangerous in an interview answer and in production. Seasonality, drift and repeated entities leak across the split. `TimeSeriesSplit` keeps training data strictly earlier than validation data, and `gap` drops the rows nearest the boundary when labels mature late. Use `GroupKFold` as well when the same user appears in many rows.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1194,6 +1212,29 @@ Feature engineering (adding velocity features, device fingerprinting) would
 likely move the AUC from 0.95 → 0.97, but the threshold optimization might
 reduce total daily cost by 50% without changing the model at all."
 ```
+
+The same point as code, for the whiteboard follow-up "show me how you would pick the threshold":
+
+```python
+# BROKEN: the default 0.5 cutoff, chosen by nobody, judged by AUC-ROC
+import numpy as np
+
+def flag_broken(scores: np.ndarray) -> np.ndarray:
+    return scores >= 0.5          # AUC is threshold-free, so it never sees this choice
+```
+
+```python
+# FIX: pick the cutoff that minimises the business cost on a held-out set
+def best_threshold(scores: np.ndarray, y: np.ndarray,
+                   cost_fp: float = 2.0, cost_fn: float = 200.0) -> tuple[float, float]:
+    grid = np.linspace(0.0, 1.0, 1001)
+    costs = [cost_fp * np.sum((scores >= t) & (y == 0)) +
+             cost_fn * np.sum((scores < t) & (y == 1)) for t in grid]
+    i = int(np.argmin(costs))
+    return float(grid[i]), float(costs[i])
+```
+
+The broken version is silent because AUC-ROC integrates over every threshold and so cannot detect a bad one: the model can score 0.95 AUC while the 0.5 cutoff misses most fraud. With a 100:1 cost ratio the optimal cutoff sits far below 0.5 (for calibrated scores, near cost_fp / (cost_fp + cost_fn) = 0.0099), which is why the interview answer leads with the cost function instead of the metric.
 
 **Interview Q&A — additional common questions:**
 

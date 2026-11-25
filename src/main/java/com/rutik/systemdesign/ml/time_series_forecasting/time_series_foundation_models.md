@@ -1,6 +1,8 @@
 # Time-Series Foundation Models
 
-*Zero-shot forecasting with models pretrained on millions of series — Chronos-2, TimesFM, Moirai-2, Lag-Llama, TimeGPT.*
+*Zero-shot forecasting with models pretrained on millions of series — Chronos-2, TimesFM, Moirai 2.0, Toto 2.0, Lag-Llama, TimeGPT.*
+
+> Model sizes, context lengths, licences and release dates on this page were checked against each project's README, Hugging Face model card or arXiv paper on 2026-11-25. This family ships new checkpoints roughly every six months; re-check before quoting.
 
 ---
 
@@ -57,7 +59,7 @@ of them has priors that a per-series ARIMA fitted on 60 points cannot possibly a
   Chronos line went further and *quantized* scaled values into a fixed vocabulary, which let a T5
   language-model architecture be reused essentially unchanged — forecasting as next-token prediction.
 - **Probabilistic heads.** These models emit quantiles, not a point. That is not a bonus feature; it
-  is the reason they are usable for inventory and capacity decisions at all (Principle 5).
+  is the reason they are usable for inventory and capacity decisions at all (Principle 7).
 - **Covariate conditioning.** The 2025-26 generation separates **past-only covariates** (observed
   historically, unknown in the future — traffic volume, competitor price) from **known-future
   covariates** (scheduled promotions, holidays, published weather forecasts) and accepts
@@ -73,12 +75,12 @@ replace a multivariate model.
 
 **Beyond the four build choices, five more principles decide whether pretraining is worth reaching for:**
 
-5. **The pretraining corpus, not the parameter count, is what transfers.** TimesFM 2.5 is pretrained on over 400 billion real-world time-points spanning sources from web-traffic counts to macroeconomic series (verified against Google's own announcement, §7); Chronos's corpus mixes a large synthetic generator (Gaussian processes, ARMA, trend/seasonality composites) with public real series. The synthetic half exists specifically because there is not enough diverse *real* time-series data on earth to pretrain a model the way there is text — a constraint NLP pretraining never had.
-6. **A patch is a compression ratio, not just an engineering trick.** Chronos-2 supports context lengths up to 8,192 timesteps and TimesFM 2.5 up to 16,384 — figures reachable only because the sequence the transformer actually attends over is `context_length / patch_length` tokens, not `context_length` tokens. Pick patch length too coarse and short-lived spikes wash out inside a window; too fine and you lose the long-context advantage patching exists to buy.
+5. **The pretraining corpus, not the parameter count, is what transfers.** The original TimesFM paper (Das et al., ICML 2024, [arXiv:2310.10688](https://arxiv.org/abs/2310.10688)) pretrained on a corpus of the order of 100 billion time-points, real-world (search trends, Wikipedia page views) plus synthetic, and Google's BigQuery documentation describes the current model as pretrained on "billions of time-points from many real-world datasets"; Moirai 2.0 trains on a corpus of 36M series; Chronos's corpus mixes a large synthetic generator (KernelSynth: Gaussian-process kernels composed into trend, seasonality and noise) with public real series. The synthetic half exists specifically because there is not enough diverse *real* time-series data on earth to pretrain a model the way there is text — a constraint NLP pretraining never had.
+6. **A patch is a compression ratio, not just an engineering trick.** Chronos-2 supports context lengths up to 8,192 timesteps and TimesFM 2.5 up to 16,384 — figures reachable only because the sequence the transformer actually attends over is `context_length / patch_length` tokens, not `context_length` tokens. Worked example: Chronos-2's config uses a 16-step input patch, so its 8,192-step context is 512 tokens, and attention cost scales with the token count squared, so patching cuts attention work by `(8,192 / 512)^2 = 256x`. Pick patch length too coarse and short-lived spikes wash out inside a window; too fine and you lose the long-context advantage patching exists to buy.
 7. **The quantile head is trained, not calibrated after the fact.** Point-forecast models can be wrapped with bootstrap intervals as an afterthought; a TSFM's quantile levels are outputs the pretraining objective directly optimizes (a pinball/quantile loss per level), which is why the model can emit a calibrated `p10`/`p50`/`p90` for a series it has never seen — there is no per-series calibration step to skip.
 8. **Zero-shot, fine-tuned, and self-trained are three different cost/accuracy points, not a ladder you always climb.** Zero-shot costs one forward pass and no data pipeline; fine-tuning costs a training pipeline plus a checkpoint you now own; training your own TSFM-shaped model from scratch costs a pretraining run and is almost never the right call outside a handful of companies with the corpus and compute to justify it. Most teams should never reach step three.
 9. **A global model already buys back much of what pretraining buys.** DeepAR or one LightGBM fitted across every SKU in your catalogue is *global* — it shares structure across your own series, which already solves a large fraction of cold-start. A TSFM is *pretrained on someone else's data*. Confusing the two sends teams reaching for a foundation model when a global model on their own data would have been cheaper, more accurate, and fully auditable in a backtest (see the Q&A on this distinction in §12).
-10. **Group attention cost scales with the square of the group size, so grouping is a design choice, not a default.** Attention over `n` series in a group costs `O(n^2)` the same way attention over `n` timesteps does, which is why a production deployment groups series along a real correlation boundary — the SKUs in one product category, the sensors on one machine — rather than passing an entire 40,000-SKU catalogue into a single group call. Unrelated series thrown into one group do not just fail to help (Principle 6's group-attention Q&A in §12); they also spend compute the model gets no signal back for.
+10. **Group attention cost scales with the square of the group size, so grouping is a design choice, not a default.** Attention over `n` series in a group costs `O(n^2)` the same way attention over `n` timesteps does, which is why a production deployment groups series along a real correlation boundary — the SKUs in one product category, the sensors on one machine — rather than passing an entire 40,000-SKU catalogue into a single group call. Unrelated series thrown into one group do not just fail to help (the group-attention Q&A in §12); they also spend compute the model gets no signal back for.
 
 ---
 
@@ -94,8 +96,8 @@ replace a multivariate model.
 | **TimesFM 3.0** (`google/timesfm-3.0-pytorch`, 330M) | Google, Aug 2026 | past-only and past-and-future | Yes, native multivariate | timesfm-non-commercial-license-v1.0 (commercial use only through Google Cloud) | Runs in BigQuery ML; ranks first on fev-bench per Google's README |
 | **TimesFM 2.5** (`google/timesfm-2.5-200m-*`, 200M) | Google, Sep 2025 | via XReg | No | Apache-2.0 | The last Apache-2.0 TimesFM checkpoint; 16,384-step context |
 | **Toto 2.0** (`Datadog/Toto-2.0-*`, 4M / 22M / 313M / 1B / 2.5B) | Datadog, Apr 2026 | No (2.0 takes no exogenous variables) | Yes, alternating time/variate attention | Apache-2.0 (code and weights) | Built for observability metrics; reports top scores on GIFT-Eval and Datadog's BOOM observability benchmark |
-| **Moirai-2** | Salesforce, Aug 2025 | yes | Yes | CC-BY-NC-4.0 (research only) | Positioned for complex multivariate data |
-| **Lag-Llama** | community | limited | No | open weights | Probabilistic-first, decoder-only |
+| **Moirai 2.0** (`Salesforce/moirai-2.0-R-small`) | Salesforce, Aug 2025 | not documented on the model card | not documented on the model card | CC-BY-NC-4.0 (research only) | Decoder-only, quantile loss, multi-token prediction; trained on 36M series; 2x faster and 30x smaller than Moirai-1.0-Large ([arXiv:2511.11698](https://arxiv.org/abs/2511.11698)) |
+| **Lag-Llama** | Rasul et al., 2023 ([arXiv:2310.08278](https://arxiv.org/abs/2310.08278)) | limited | No | Apache-2.0 | Probabilistic-first, decoder-only |
 | **TimeGPT** | Nixtla | yes | limited | commercial API | No weights; you rent the endpoint |
 
 Model sizes and licence for the Chronos family are from the
@@ -112,7 +114,7 @@ smallest useful checkpoints run on CPU.
 **Benchmarks to know.** **GIFT-Eval** and **fev-bench** are the two the field currently quotes. Both
 exist because the older M-competition datasets are now almost certainly inside every pretraining
 corpus, which makes them useless for evaluating a pretrained model — a leakage problem the benchmarks
-were explicitly designed around, and the same problem you have with your own public series (Pitfall 8).
+were explicitly designed around, and the same problem you have with your own public series (Pitfall 3).
 
 Two specific checkpoint figures are worth pinning down because they get quoted loosely: **TimesFM 2.5**
 (`google/timesfm-2.5-200m-*` on Hugging Face) is 200M parameters with a 16,384-timestep context window,
@@ -316,13 +318,18 @@ what it actually costs you, and re-fits both models at multiple rolling origins 
 train/test split. This is a minimal, runnable version — not a framework, just the shape of the check:
 
 ```python
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 
+ForecastFn = Callable[[pd.DataFrame, int], dict[str, np.ndarray]]
+
+
 def rolling_origin_backtest(
     long_df: pd.DataFrame,      # columns: id, timestamp, target, volume_weight
-    tsfm_predict_fn,            # (context_df, horizon) -> point forecast per id
-    baseline_predict_fn,        # same signature, e.g. seasonal-naive
+    tsfm_predict_fn: ForecastFn,      # (context_df, horizon) -> point forecast per id
+    baseline_predict_fn: ForecastFn,  # same signature, e.g. seasonal-naive
     horizon: int = 13,
     n_origins: int = 4,
     step: int = 13,
@@ -403,28 +410,69 @@ correlates with a specific event (a promotional spike, a stockout the actuals re
 did not capture) it is worth understanding before trusting the aggregate. This is the same discipline as
 the head/tail segmentation in Pitfall 1, applied along the time axis instead of the catalogue axis.
 
+### 6.3 Checking the Quantiles — Pinball Loss and Coverage on Hand-Checkable Numbers
+
+Point accuracy says nothing about whether a `p90` is really a 90th percentile, and a reorder policy
+built on the `p90` depends on exactly that. Two numbers check it: **pinball loss** (the loss the quantile
+head was trained on, so lower is better) and **empirical coverage** (the share of actuals at or below the
+quantile, which should be close to the level).
+
+```python
+import numpy as np
+
+
+def pinball(y: np.ndarray, q_pred: np.ndarray, level: float) -> float:
+    """Mean quantile loss: under-forecasts cost `level` per unit, over-forecasts cost `1 - level`."""
+    diff = y - q_pred
+    return float(np.mean(np.maximum(level * diff, (level - 1) * diff)))
+
+
+def coverage(y: np.ndarray, q_pred: np.ndarray) -> float:
+    return float(np.mean(y <= q_pred))
+
+
+if __name__ == "__main__":
+    actual = np.array([12, 30, 18, 25, 40, 22, 15, 28, 35, 20], dtype=float)
+    p90_a = np.array([20, 35, 25, 30, 38, 30, 22, 33, 40, 26], dtype=float)   # model A
+    p90_b = np.array([15, 28, 20, 24, 33, 24, 17, 27, 31, 22], dtype=float)   # model B, sharper
+
+    for name, p90 in (("A", p90_a), ("B", p90_b)):
+        print(name, "coverage", coverage(actual, p90), "pinball", round(pinball(actual, p90, 0.9), 2))
+    # A coverage 0.9 pinball 0.74
+    # B coverage 0.5 pinball 1.46
+```
+
+Model B's `p90` is narrower and looks more "confident", but it covers only 5 of 10 actuals, so ordering
+against it stocks out half the weeks instead of one week in ten. Pinball loss catches it too. B
+under-forecasts five weeks by `2 + 1 + 7 + 1 + 4 = 15` units, charged at 0.9 per unit, and over-forecasts
+the other five by `3 + 2 + 2 + 2 + 2 = 11`, charged at 0.1: `(13.5 + 1.1) / 10 = 1.46`. A under-forecasts
+one week by 2 units and over-forecasts the rest by 56 in total: `(1.8 + 5.6) / 10 = 0.74`. The 9:1 price
+on under-forecasting is what makes the wider, honest quantile win. In production, compute both per
+segment over at least 52 weekly origins: 10 points cannot distinguish 0.85 coverage from 0.9, while 520
+can resolve coverage to a standard error of about `sqrt(0.9 x 0.1 / 520) = 0.013`.
+
 ---
 
 ## 7. Real-World Examples
 
-**Google — TimesFM in BigQuery, AlloyDB, and Agent Platform.** Google shipped `AI.FORECAST`/`AI.EVALUATE`
-(BigQuery ML, generally available since November 2025) and `AI.FORECAST` (AlloyDB, public preview) on
-top of TimesFM, and lists it in Model Garden on Agent Platform — a zero-shot forecast is callable as SQL
-inside the warehouse with no separate training pipeline. TimesFM 3.0 (August 2026, 330M parameters)
-adds native multivariate forecasting and covariates; its downloadable weights are non-commercial, so
-commercial use runs through BigQuery ML, where the multivariate TimesFM models are in Preview.
-TimesFM 2.5, the last Apache-2.0 checkpoint, is 200M parameters with a 16,384-timestep context window
-and is pretrained on more than 400 billion real-world time-points; Google reports it first among
-zero-shot models on GIFT-Eval for both point (MASE) and probabilistic (CRPS) accuracy. (Google Cloud
-Blog; BigQuery TimesFM documentation; `google-research/timesfm` README; Hugging Face model cards.)
+**Google — TimesFM in BigQuery and Vertex AI Model Garden.** Google exposes TimesFM through BigQuery ML
+(`AI.FORECAST`, plus `AI.DETECT_ANOMALIES` for anomaly detection), Google Sheets via Connected Sheets, and
+a Vertex AI Model Garden endpoint — a zero-shot forecast is callable as SQL inside the warehouse with no
+separate training pipeline. TimesFM 3.0 (August 2026, 330M parameters) adds native multivariate
+forecasting and covariates; its downloadable weights are non-commercial, so commercial use runs through
+BigQuery ML, where the multivariate TimesFM models are in Preview. TimesFM 2.5 (September 2025), the
+last Apache-2.0 checkpoint, is 200M parameters (down from 500M in 2.0) with a 16,384-timestep context
+window, up from 2,048, and Google reported it first among zero-shot models on GIFT-Eval for both point
+(MASE) and probabilistic (CRPS) accuracy at its release. (BigQuery TimesFM documentation;
+`google-research/timesfm` README; Hugging Face model cards.)
 
-**Amazon — Chronos on SageMaker and AutoGluon-TimeSeries.** Chronos-2 (120M parameters, Apache-2.0,
-8,192-timestep context) ships through both SageMaker JumpStart and AutoGluon-TimeSeries/AutoGluon-Cloud,
-the latter offering a plain "pass a DataFrame in, get forecasts back" API with real-time, serverless and
-batch inference options. Amazon reports the Chronos family has been downloaded more than 120 million
-times from Hugging Face — evidence of adoption breadth, not of accuracy on any one workload; verify on
-your own backtest regardless (Pitfall 8). (Hugging Face model card; AWS Machine Learning Blog;
-AutoGluon-Cloud documentation.)
+**Amazon — Chronos on SageMaker and AutoGluon-TimeSeries.** Chronos-2 (released 2025-10-20, 120M
+parameters, Apache-2.0, 8,192-timestep context; a 28M `chronos-2-small` also ships) is deployable through
+SageMaker JumpStart and AutoGluon-Cloud, the latter offering a plain "pass a DataFrame in, get forecasts
+back" API with real-time, serverless and batch inference options. The Hugging Face API reported about
+10.3 million downloads of `amazon/chronos-2` in the 30 days to 2026-11-25 — evidence of adoption breadth,
+not of accuracy on any one workload; verify on your own backtest regardless (Pitfall 3).
+(`amazon-science/chronos-forecasting` README; Hugging Face model card and API.)
 
 **Nixtla — TimeGPT as a rented API.** TimeGPT is not distributed as open weights; it is a hosted
 endpoint (`dashboard.nixtla.io`) pretrained on more than 100 billion data points, called with a Python
@@ -437,7 +485,7 @@ looks like" is useful beyond the forecasting task this file focuses on. (Nixtla 
 
 **Deployment breadth as its own signal.** What is notable across all three vendors is not any single
 accuracy claim but how many *ways* each now offers to call a zero-shot forecast: SQL inside a warehouse
-(BigQuery `AI.FORECAST`), a managed notebook environment (SageMaker JumpStart, Model Garden on Agent Platform), a
+(BigQuery `AI.FORECAST`), a managed notebook environment (SageMaker JumpStart, Vertex AI Model Garden), a
 DataFrame-in-DataFrame-out library call (AutoGluon-TimeSeries), and a plain REST API (TimeGPT). That
 breadth is itself evidence the "no fitting step" property from §1 is being taken seriously as a product
 surface, not just a research result — each integration point exists specifically because zero-shot
@@ -492,7 +540,7 @@ making the call.
 
 ## 9. When to Use / When NOT to Use
 
-Read both lists against your own catalogue's history-per-series distribution (Principle 6), not against
+Read both lists against your own catalogue's history-per-series distribution (§8), not against
 the model in isolation — the same TSFM is a clear yes for one segment of a catalogue and a clear no for
 another, which is precisely §14's worked example.
 
@@ -509,7 +557,7 @@ another, which is precisely §14's worked example.
 - **You have millions of rows of one series and rich exogenous features.** A tuned LightGBM with lag and calendar features generally wins, and it wins cheaply. This is the single most common wrong application.
 - **The forecast must be explainable to a planner or a regulator.** A TSFM offers no decomposition — no trend/seasonality split, no coefficient, no feature importance. If someone must justify a purchase order, Prophet's interpretability may outrank accuracy.
 - **Microsecond inference on commodity CPU at high fan-out.** A 120M-parameter forward pass is orders of magnitude more expensive per forecast than an ARIMA evaluation; at millions of series refreshed per minute the arithmetic stops working.
-- **Your evaluation series are public.** If your backtest data plausibly sits in the pretraining corpus, you cannot measure the model honestly on it (Pitfall 8).
+- **Your evaluation series are public.** If your backtest data plausibly sits in the pretraining corpus, you cannot measure the model honestly on it (Pitfall 3).
 - **It does not beat seasonal-naive on your own rolling-origin backtest.** No leaderboard position overrides this.
 
 ---
@@ -529,14 +577,17 @@ GBDT retained for the head.
 
 ### Pitfall 2: Silent context-window truncation dropping a seasonality
 
-A team fed three years of daily data to a TSFM to capture yearly seasonality and got forecasts with no
-annual pattern at all. The model's context window held roughly the most recent year; everything earlier
-was silently truncated, so the yearly cycle was never visible to it — there was no warning, no error,
-and the forecasts looked plausible. **Fix:** check the checkpoint's context length against the number of
-observations one full seasonal cycle requires *before* choosing a frequency. Aggregating daily to weekly
-often fixes it outright: 3 years of weekly data is 156 points and fits comfortably where 1,095 daily
-points do not. Verify by forecasting a series with a known strong annual cycle and confirming the model
-reproduces it.
+A team fed three years of daily data to an original Chronos-T5 checkpoint to capture yearly seasonality
+and got forecasts with no annual pattern at all. Chronos-T5's context is 512 steps, about 1.4 years of
+daily data, so the model saw less than one and a half annual cycles of the 1,095 points it was given;
+everything earlier was silently truncated, with no warning and no error, and the forecasts looked
+plausible. The same frame fits comfortably in Chronos-2 (8,192 steps, 22 years of daily data) or
+TimesFM 2.5 (16,384), so the bug is not "TSFMs have short contexts" but "the checkpoint in this config
+has a different context from the one the design assumed". **Fix:** check the checkpoint's context length
+against the number of observations one full seasonal cycle requires *before* choosing a frequency, and
+assert it in code. Aggregating daily to weekly often fixes it outright: 3 years of weekly data is 156
+points and fits in 512 where 1,095 daily points do not. Verify by forecasting a series with a known
+strong annual cycle and confirming the model reproduces it.
 
 ### Pitfall 3: Backtesting a pretrained model on data inside its pretraining corpus
 
@@ -572,6 +623,35 @@ covariate, write down explicitly whether its value for the horizon is known *bef
 requested, and unit-test that `future_df` actually contains the planned-promotion column with non-null
 values for every horizon timestamp.
 
+```python
+import pandas as pd
+
+KNOWN_FUTURE = {"on_promo", "is_holiday"}   # the reviewed data contract
+PAST_ONLY = {"realized_traffic"}
+
+
+# BROKEN: every covariate goes into the context frame, including the planned promotions.
+# Chronos-2 accepts it, treats on_promo as past-only, and never sees the horizon's promo weeks.
+def build_frames_broken(history: pd.DataFrame, plan: pd.DataFrame) -> tuple[pd.DataFrame, None]:
+    return pd.concat([history, plan], ignore_index=True), None
+
+
+# FIX: split by the contract and refuse to forecast if a known-future column has gaps.
+def build_frames(history: pd.DataFrame, plan: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    context_df = history[["id", "timestamp", "target", *sorted(KNOWN_FUTURE | PAST_ONLY)]]
+    future_df = plan[["id", "timestamp", *sorted(KNOWN_FUTURE)]]
+    per_id = future_df.groupby("id")["timestamp"].nunique()
+    if (per_id != horizon).any():
+        raise ValueError(f"future_df must cover all {horizon} horizon steps for every id")
+    if future_df[sorted(KNOWN_FUTURE)].isna().any().any():
+        raise ValueError("known-future covariates have nulls in the horizon")
+    return context_df, future_df
+```
+
+The two checks cost microseconds and turn a silent accuracy loss into a failed job. In the incident, the
+promotion weeks were about 9% of horizon weeks but drove about 30% of horizon units, so the zero-visibility
+forecast under-predicted exactly the weeks that mattered most for stock.
+
 ### Pitfall 6: Discarding quantiles at the last mile
 
 A demand-planning team wired Chronos-2's `p10`/`p50`/`p90` output into a downstream inventory system
@@ -605,7 +685,7 @@ directly against it.
 | GluonTS (Amazon) | DeepAR, Temporal Fusion Transformer | Global-model baseline to compare against a pretrained TSFM (Principle 9) |
 | Darts | Unified API for all model types | Wraps classical, deep-learning and several TSFM checkpoints behind one interface |
 | AutoGluon-TimeSeries | Ensembling TSFMs with statistical models | The production path used on SageMaker; ships Chronos-2 with a DataFrame-in/forecast-out API |
-| timesfm (Google) | TimesFM checkpoint loading and inference | Checkpoints `google/timesfm-2.5-200m-pytorch` (Apache-2.0) and `google/timesfm-3.0-pytorch` (non-commercial); also reachable through BigQuery `AI.FORECAST` and Model Garden on Agent Platform with no local install |
+| timesfm (Google) | TimesFM checkpoint loading and inference | Checkpoints `google/timesfm-2.5-200m-pytorch` (Apache-2.0) and `google/timesfm-3.0-pytorch` (non-commercial); also reachable through BigQuery `AI.FORECAST` and Vertex AI Model Garden with no local install |
 | toto-models (Datadog) | Toto 2.0 inference | `pip install toto-models` (Python 3.12+); `Toto2Model.from_pretrained("Datadog/Toto-2.0-22m")` returns 9 quantiles per variate; no fine-tuning API in 2.0 |
 | nixtla (Python/R client) | Calling the TimeGPT hosted API | No local weights; requires an API key from `dashboard.nixtla.io` |
 
@@ -636,7 +716,7 @@ Because the cost of being wrong is asymmetric, so the optimal decision is a quan
 **Q: What does a foundation model's context window cost you, and how do you detect the problem?**
 **Short:** History beyond the context window is silently truncated, so a seasonality longer than the window vanishes from the forecast with no warning.
 
-It silently caps how much history the model can see, and anything beyond it is dropped without an error. The expensive case is a seasonal cycle longer than the window: feed three years of daily data to a model whose context holds roughly one year and the annual pattern is simply invisible, producing forecasts that look plausible and contain no yearly seasonality at all. Nothing warns you — no exception, no truncation notice — which puts it in the same family as every other silent-loss failure in forecasting. Detect it by checking the checkpoint's context length against the number of observations one full seasonal cycle needs *before* you pick a frequency, and confirm empirically by forecasting a series with a known strong annual cycle and verifying the model reproduces it. The usual fix is aggregation rather than a bigger model: three years of weekly data is 156 points and fits where 1,095 daily points do not, and weekly is often the decision granularity anyway.
+It silently caps how much history the model can see, and anything beyond it is dropped without an error. The expensive case is a seasonal cycle longer than the window: feed three years of daily data to a checkpoint whose context holds 512 steps (about 1.4 years, the original Chronos-T5) and the annual pattern is barely visible, producing forecasts that look plausible and contain little yearly seasonality. Nothing warns you — no exception, no truncation notice — which puts it in the same family as every other silent-loss failure in forecasting. Detect it by checking the checkpoint's context length against the number of observations one full seasonal cycle needs *before* you pick a frequency, and confirm empirically by forecasting a series with a known strong annual cycle and verifying the model reproduces it. The usual fix is aggregation rather than a bigger model: three years of weekly data is 156 points and fits where 1,095 daily points do not, and weekly is often the decision granularity anyway.
 
 **Q: What is the difference between a global model and a pretrained foundation model for forecasting?**
 **Short:** A global model is trained on all of your own series at once; a pretrained model arrives already trained on millions of unrelated series.
@@ -671,7 +751,7 @@ Because the parameter count is two to three orders of magnitude smaller than the
 **Q: How do you pick a context length against a series' seasonal period?**
 **Short:** The context window must hold at least one, ideally several, full seasonal cycles at the frequency you choose, or the model never sees the pattern.
 
-You need the context window, measured in observations, to comfortably contain the seasonal cycle you want the model to learn, and you choose the series' frequency with that arithmetic in mind rather than defaulting to the finest grain available. A yearly cycle needs roughly 365 points at daily frequency but only about 52 at weekly, so a checkpoint with an eight-thousand-step context window handles a decade of weekly data easily but truncates only a few years of daily data — the exact failure in Pitfall 2. The practical procedure: identify the longest seasonal period that matters for the decision, compute how many observations one full cycle needs at each candidate frequency, and pick the coarsest frequency that still gives the decision-relevant resolution while leaving comfortable headroom inside the checkpoint's published context length. Then verify empirically rather than trusting the arithmetic alone — forecast a series with a known strong seasonal signal and confirm the output actually reproduces it.
+You need the context window, measured in observations, to comfortably contain the seasonal cycle you want the model to learn, and you choose the series' frequency with that arithmetic in mind rather than defaulting to the finest grain available. A yearly cycle needs roughly 365 points at daily frequency but only about 52 at weekly, so a checkpoint with a 512-step context (the original Chronos-T5) holds only 1.4 years of daily data but nearly 10 years of weekly data, while Chronos-2's 8,192-step window holds about 22 years of daily data — the exact failure in Pitfall 2 is a mismatch between the checkpoint actually deployed and the one the design assumed. The practical procedure: identify the longest seasonal period that matters for the decision, compute how many observations one full cycle needs at each candidate frequency, and pick the coarsest frequency that still gives the decision-relevant resolution while leaving comfortable headroom inside the checkpoint's published context length. Then verify empirically rather than trusting the arithmetic alone — forecast a series with a known strong seasonal signal and confirm the output actually reproduces it.
 
 **Q: What problem were GIFT-Eval and fev-bench specifically built to fix?**
 **Short:** They exclude or account for pretraining-corpus contamination that makes the older M-competition benchmarks unable to discriminate between pretrained forecasters.
@@ -783,6 +863,40 @@ answer) the tail path was built to provide, and it can move independently of poi
 New SKUs enter on the TSFM path by construction (there is no other option with zero history), and the
 system logs which path served every purchase-order recommendation so a post-mortem can always attribute
 a bad order to the model that produced it.
+
+**BROKEN -> FIX: the purchase-order writer collapsed the forecast to its median.** The first tail-path
+release reproduced Pitfall 6 exactly: the PO service's schema had one `forecast_units` column, so the
+integration wrote the `0.5` column into it and the order-up-to logic ran on the median.
+
+```python
+import pandas as pd
+
+
+def order_qty_broken(pred: pd.DataFrame, on_hand: pd.Series) -> pd.Series:
+    # BROKEN: the median ignores the 9:1 cost of a stockout versus a week of overstock
+    return (pred["0.5"] - on_hand).clip(lower=0).round()
+
+
+def order_qty(pred: pd.DataFrame, on_hand: pd.Series, service_level: str = "0.9") -> pd.Series:
+    # FIX: order up to the quantile the service level asks for; the level is configuration
+    if service_level not in pred.columns:
+        raise KeyError(f"forecast has no {service_level} column; request it in quantile_levels")
+    return (pred[service_level] - on_hand).clip(lower=0).round()
+
+
+if __name__ == "__main__":
+    # 13-week horizon demand for one tail SKU, summed: p50 = 40 units, p90 = 70 units
+    pred = pd.DataFrame({"0.5": [40.0], "0.9": [70.0]}, index=["SKU_4417"])
+    on_hand = pd.Series([20.0], index=["SKU_4417"])
+    print(order_qty_broken(pred, on_hand).iloc[0], order_qty(pred, on_hand).iloc[0])  # 20.0 50.0
+```
+
+Ordering 20 units stocks out whenever demand exceeds 40, which by construction is about half the time;
+ordering 50 stocks out only when demand exceeds 70, about one horizon in ten. Across the 30,000-SKU
+tail the broken release under-ordered by `p90 - p50` per SKU, and the first post-launch stockout review
+found the tail's in-stock rate unchanged from the pre-migration baseline, the "no movement" signal that
+led the team to the integration. The fix also widened the PO schema to carry the service level that
+produced each order, so the next audit can see which quantile drove it.
 
 **Where this connects.** The full case study, including feature-store wiring, evaluation cadence and
 rollout mechanics for a production demand-forecasting system, is

@@ -720,6 +720,28 @@ Two cells people over-read. **Redis Cluster is not strongly consistent as a syst
 
 **Offline store partitioning mismatch**: feature snapshots are partitioned by `dt=YYYY-MM-DD` but training jobs request features across multiple months. A bug in the partition pruning logic causes the Spark job to scan all partitions instead of only the relevant date range. A training job that took 2 hours now takes 18 hours and exhausts the cluster. Fix: test partition pruning explicitly; use EXPLAIN on Spark plans; add partitioned reads with explicit date range filters.
 
+**TTL misconfiguration as code: stale features served without a signal.**
+
+```python
+# BROKEN: an hourly feature with a 24 h TTL; a missing value silently becomes 0
+r.set(f"user:{uid}:spend_1h", value, ex=24 * 3600)
+spend = float(r.get(f"user:{uid}:spend_1h") or 0.0)
+```
+
+```python
+# FIX: store the computation time with the value and enforce a freshness budget on read
+import json
+import time
+
+r.set(f"user:{uid}:spend_1h", json.dumps({"v": value, "ts": time.time()}), ex=3 * 3600)
+raw = r.get(f"user:{uid}:spend_1h")
+rec = json.loads(raw) if raw else None
+fresh = rec is not None and time.time() - rec["ts"] < 2 * 3600
+spend = rec["v"] if fresh else DEFAULT_SPEND_1H       # and increment a staleness counter
+```
+
+When the hourly job fails, the broken version keeps serving the last value for up to a day, and a missing key reads as a real zero. Both look like valid features to the model. Storing the timestamp turns staleness into something the server can test and count, so a failed job becomes an alert within the freshness budget instead of a slow accuracy drop.
+
 ---
 
 ## 11. Technologies & Tools
@@ -894,3 +916,29 @@ The feature fetch is **13.3% of the budget** and network plus serialization is 3
 **Point-in-time correctness**: the fraud model is retrained weekly. Training data is generated using point-in-time correct joins: for each historical transaction, features are retrieved as of the transaction timestamp (not current values). This is critical — including future "count_5m" values (computed after the transaction) would show 0 for fraudulent transactions that were later blocked, leaking the label.
 
 **Outcome**: training-serving skew reduced from ~8% feature value mismatch (pre-store) to < 0.1% (post-store, integration tested). Fraud precision improved from 0.71 to 0.79 due to elimination of leakage and skew. Serving P99 latency: 22ms (within 30ms budget).
+
+**BROKEN → FIX: the training join that reads today's feature values.** The point-in-time paragraph above, as the two lines of pandas that get it wrong and right.
+
+```python
+import pandas as pd
+
+# BROKEN: join the CURRENT feature snapshot onto every historical transaction
+train = tx.merge(features_latest, on="user_id", how="left")
+# a transaction from March gets count_5m as computed today, including activity that happened
+# after it, and for a blocked fraudster today's value is 0: the label leaks into the feature
+```
+
+```python
+# FIX: as-of join per user, strictly before the event, no older than the online TTL
+tx = tx.sort_values("event_ts")
+feats = feature_log.sort_values("feature_ts")   # every value the pipeline ever wrote, with its time
+train = pd.merge_asof(
+    tx, feats,
+    left_on="event_ts", right_on="feature_ts", by="user_id",
+    direction="backward",                       # latest value at or before the event...
+    allow_exact_matches=False,                  # ...excluding values written at the same instant
+    tolerance=pd.Timedelta("10min"),            # count_5m expires after 10 min online: mirror it
+)
+```
+
+`tolerance` is the detail that closes the last bit of skew: the online key has a 10-minute TTL, so at serving time a user idle for an hour gets a missing value, not a stale count; without the tolerance the training set would carry that stale count and the model would learn from a value it can never see in production. Use one tolerance per feature group (10 minutes, 2 hours, 25 hours here), matching each group's TTL.

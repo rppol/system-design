@@ -1005,8 +1005,8 @@ Gradient boosting constructs an additive model F_M(x) = Σ η*h_m(x) by sequenti
 
 At 5,000 rows, tabular foundation models are inside their strongest regime. TabICLv2 reports beating tuned XGBoost, CatBoost, or LightGBM on about 80% of TabArena datasets, and TabPFN-2.5 reports a 100% win rate against default XGBoost on classification sets up to 10,000 rows. They need no hyperparameter search. Check three things before switching: the license (TabPFN-2.5 and later weights are non-commercial), inference cost (the model re-reads the training set at predict time, unlike microsecond GBDT scoring), and explainability needs (TreeSHAP is mature for trees). GBDT remains the safer default for large tables and tight CPU latency budgets.
 
-**Q: What is shrinkage (learning rate) in gradient boosting and what tradeoff does it introduce?**
-**Short:** A smaller shrinkage learning rate needs more boosting rounds to reach the same training loss but generalizes better, like gradient descent with a smaller step size avoiding overshoot.
+**Q: Why does a smaller boosting learning rate (eta) generalize better, and what does it cost?**
+**Short:** A small eta makes each tree a partial correction, so the ensemble overshoots less and generalizes better, at the cost of many more trees and longer training.
 Shrinkage scales each tree's contribution by η: F_m(x) = F_{m-1}(x) + η*h_m(x). A smaller η requires more trees to reach the same training loss but typically achieves better generalisation — each tree makes a conservative, partial correction rather than a full step. This is analogous to gradient descent with a small step size: it takes more iterations but avoids overshooting the minimum. The practical tradeoff: η=0.01 needs 5000 trees (slow training) but generalises well; η=0.3 with 100 trees trains fast but often overfits. Best practice: set η=0.05, set n_estimators very high, and use early stopping to find the optimal number of trees on a validation set.
 
 **Q: What is the difference between AdaBoost and gradient boosting?**
@@ -1175,3 +1175,28 @@ for patient_idx in high_risk_patients:
 ```
 
 **Outcome**: OOF AUC 0.823 vs baseline logistic regression 0.771. At the clinically agreed threshold (top 20% risk score), recall for true readmissions improved from 48% to 67%. SHAP explanations accepted by clinical review board — each high-risk patient's alert included the top 3 contributing factors in natural language derived from SHAP values.
+
+**BROKEN → FIX: folds that split one patient across train and validation.** The 120K rows are admissions, and a frequently readmitted patient contributes many of them.
+
+```python
+from sklearn.model_selection import StratifiedKFold
+
+# BROKEN: row-level folds — admission 1 of a patient trains, admission 2 validates
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+for tr_idx, val_idx in cv.split(X, y):
+    ...
+# the model memorises patient-specific lab profiles and "predicts" the same patient's
+# other admissions; OOF AUC rises and the deployed model sees only new admissions
+```
+
+```python
+from sklearn.model_selection import StratifiedGroupKFold
+
+# FIX: every admission of a patient lands in the same fold; class balance is kept per fold
+cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+for tr_idx, val_idx in cv.split(X, y, groups=patient_id):
+    assert set(patient_id[tr_idx]).isdisjoint(patient_id[val_idx])
+    ...
+```
+
+The question the model answers in production is "will this admission be followed by a readmission", asked about patients whose history the training set may contain but whose current admission it never saw; group folds by patient make validation ask the same question. Expect OOF AUC to drop after the fix: that drop is the size of the leak, and it is the number to report to the review board. The same params dict also has a quieter defect: LightGBM ignores `subsample` unless `subsample_freq` is above 0 (see the XGBoost/LightGBM case study).

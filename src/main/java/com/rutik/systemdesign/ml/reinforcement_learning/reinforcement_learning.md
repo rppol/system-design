@@ -30,6 +30,17 @@ Key insight: The exploration-exploitation dilemma is the central tension in RL �
 4. Bellman optimality: the optimal value of any state equals the immediate reward plus the discounted optimal value of the best next state. This recursive structure is the foundation of dynamic programming and Q-learning.
 5. On-policy vs off-policy: on-policy methods (SARSA, PPO) evaluate the policy being followed; off-policy methods (Q-learning, DQN) can learn from data collected by any policy (including random exploration or a replay buffer).
 
+**Principle 2 in numbers — gamma sets an effective horizon.** The discounted return weights a reward t steps ahead by gamma^t, and the total weight of a constant reward of 1 is a geometric series:
+
+```
+G = r_0 + gamma r_1 + gamma^2 r_2 + ...      with r_t = 1:  G = 1 / (1 - gamma)
+
+gamma = 0.90: horizon 1 / 0.10 = 10 steps;   weight halves every ln 0.5 / ln 0.90 = 6.6 steps
+gamma = 0.99: horizon 1 / 0.01 = 100 steps;  weight halves every ln 0.5 / ln 0.99 = 69 steps
+```
+
+Moving gamma from 0.90 to 0.99 lets the agent see a payoff 10 times further ahead, and it also scales the size of the values the critic must fit by 10x (a per-step reward of 1 gives V near 10 versus near 100), which is one reason training gets less stable as gamma approaches 1. Choose gamma from the delay between action and consequence in the task, not by habit: a reward that arrives 200 steps after the decisive action is weighted 0.99^200 = 0.13 and 0.90^200 ≈ 7 x 10^-10.
+
 ---
 
 ## 4. Types / Architectures / Strategies

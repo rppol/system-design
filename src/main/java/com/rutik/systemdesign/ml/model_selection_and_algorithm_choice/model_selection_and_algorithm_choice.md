@@ -587,6 +587,34 @@ points toward the rare top-right "ideal" corner.
 
 **Using the same algorithm across all sub-problems.** A marketplace matching system that uses GBDT for supply forecasting, demand prediction, ranking, and assignment is using the wrong tool for the assignment problem (which is a combinatorial optimization, not a prediction problem). Each sub-problem has a natural algorithm class; forcing one algorithm everywhere degrades overall system quality.
 
+**BROKEN → FIX: selecting on AUC, then acting on the probabilities.** The calibration pitfall above, in code. The churn model is chosen for its ranking quality and then used as if its scores were churn rates.
+
+```python
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+# BROKEN: rank-good, probability-wrong
+clf = HistGradientBoostingClassifier(class_weight="balanced").fit(X_train, y_train)
+p_churn = clf.predict_proba(X_test)[:, 1]
+offer = p_churn > 0.7
+# class_weight="balanced" up-weights the minority class, which inflates its predicted
+# probabilities: "0.7" no longer means a 70% churn rate, so the offer budget lands on the wrong people
+```
+
+```python
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+
+# FIX: calibrate with cross-validation, then CHECK calibration on held-out data
+base = HistGradientBoostingClassifier(class_weight="balanced")
+clf = CalibratedClassifierCV(base, method="isotonic", cv=5).fit(X_train, y_train)
+p_churn = clf.predict_proba(X_test)[:, 1]
+
+frac_churned, mean_pred = calibration_curve(y_test, p_churn, n_bins=10, strategy="quantile")
+# each decile's mean predicted probability should sit within a few points of its observed churn rate
+offer = p_churn > 0.7
+```
+
+Isotonic calibration is monotone, so AUC is essentially unchanged: the ranking the model was selected for survives, and only the probability scale moves to match observed frequencies. Use `method="sigmoid"` when the calibration data is small (a few thousand rows or fewer), because isotonic regression overfits with little data.
+
 ---
 
 ## 11. Technologies & Tools
@@ -721,6 +749,30 @@ Step 5 — Calibration of tier cutoffs: The LightGBM outputs raw dollar predicti
 Step 6 — Serving: Export LightGBM model to ONNX. p99 inference on CPU pod: 1.8ms. Meets 5ms budget. Deploy behind a feature lookup service that provides RFM features precomputed hourly.
 
 **Outcome (illustrative — this is a worked hypothetical, not a published result):** Bid price optimization using LTV predictions increased ROI on paid acquisition by 12% over the heuristic model. Marketing team adopted the SHAP-based explanations for customer segment reports. Model retrains weekly on rolling 24-month window.
+
+**BROKEN → FIX: fitting the Step 5 correction on the hold-out you then report on.** The isotonic correction is itself a model, and it needs its own data.
+
+```python
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import mean_absolute_error
+
+# BROKEN: fit the correction on the 6-month hold-out, then score the corrected predictions there
+iso = IsotonicRegression(out_of_bounds="clip").fit(pred_holdout, ltv_holdout)
+mae = mean_absolute_error(ltv_holdout, iso.predict(pred_holdout))
+# isotonic regression can fit a step per distinct prediction, so on its own training rows it
+# reproduces much of the noise; the reported MAE is optimistic by an unknown amount
+```
+
+```python
+from sklearn.model_selection import train_test_split
+
+# FIX: split the hold-out by customer into a calibration half and a report half
+p_cal, p_rep, y_cal, y_rep = train_test_split(pred_holdout, ltv_holdout, test_size=0.5, random_state=42)
+iso = IsotonicRegression(out_of_bounds="clip", increasing=True).fit(p_cal, y_cal)
+mae = mean_absolute_error(y_rep, iso.predict(p_rep))   # the number the bidding team may rely on
+```
+
+The same rule governs every post-hoc step (isotonic or Platt calibration, threshold tuning, tier cut-offs): data that shaped the step cannot measure it. Report MAE rather than MAPE on LTV, because customers with zero realised LTV make MAPE undefined; `sklearn`'s `mean_absolute_percentage_error` returns an arbitrarily large number instead of failing.
 
 **Cross-references:**
 - Algorithm choice rationale: this module (model_selection_and_algorithm_choice)

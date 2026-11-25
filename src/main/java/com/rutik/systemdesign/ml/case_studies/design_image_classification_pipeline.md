@@ -44,7 +44,7 @@ flowchart TD
         LB --> GW
         GW --> CACHE
         CACHE -->|hit| RESP(["category + top5"])
-        CACHE -->|miss| TS["TorchServe 20 GPU\nbatch 64 / 5ms delay"]
+        CACHE -->|miss| TS["Triton 20 GPU\nbatch 64 / 5ms delay"]
         TS --> RESP
     end
     subgraph Mon["Monitoring and Drift"]
@@ -70,8 +70,8 @@ sankey-beta
 Incoming 100K QPS,Redis cache hit,40
 Incoming 100K QPS,Cache miss,60
 Redis cache hit,Cached response,40
-Cache miss,TorchServe GPU,60
-TorchServe GPU,GPU response,60
+Cache miss,Triton GPU,60
+Triton GPU,GPU response,60
 ```
 
 The MD5 cache serves ~40% of requests directly, cutting effective GPU-bound traffic from 100K to 60K QPS — the single biggest lever for hitting both the latency and the cost budget.
@@ -94,7 +94,7 @@ GPU inference (15ms) plus the three 5ms stages dominate; the components sum to 3
 
 **Two-phase fine-tuning**: In phase 1, only the classifier head trains (backbone frozen). This prevents catastrophic forgetting of ImageNet features and establishes a good initialization for the head in 5 epochs. Phase 2 unfreezes all layers with a much lower LR (1e-5) to gently adapt the backbone. Skipping phase 1 hurts, and the mechanism is the defensible part: a randomly initialised head emits large, arbitrarily directed gradients on the first steps, and with the backbone unfrozen those flow straight into the pretrained weights. The *magnitude* of the drop is not something to quote from folklore — no controlled ablation exists for EfficientNet on a 1,000-class product catalog, and the answer depends heavily on head initialisation and the phase-2 learning rate. Run the two-arm experiment once on your own data and record the number.
 
-**Dynamic batching in TorchServe**: At 100K QPS with 20 GPU nodes, each node sees 5K RPS. Without batching, GPU utilization is <10% (each inference uses only a fraction of GPU compute). Dynamic batching accumulates requests for up to 5ms and processes them together (batch 64). GPU utilization rises from 10% to 80%, reducing cost 4x. The 5ms batching delay is acceptable within the 50ms budget.
+**Dynamic batching in Triton Inference Server**: At 100K QPS with 20 GPU nodes, each node sees 5K RPS. Without batching, GPU utilization is <10% (each inference uses only a fraction of GPU compute). Triton's dynamic batcher holds requests in the model's scheduler queue for at most `max_queue_delay_microseconds: 5000` (5ms) and sends them together as one batch of up to `max_batch_size: 64`; it sends immediately when the batch fills, so the delay is only paid when traffic is too light to fill a batch. GPU utilization rises from 10% to 80%, reducing cost 4x. The 5ms batching delay is acceptable within the 50ms budget. Triton's dynamic batcher adds **no** delay unless you set this field (`dynamic_batching { }` alone sends the largest batch available right away), so the 5ms is a deliberate setting, not a default.
 
 **MD5 hash caching**: Identical product images are re-submitted frequently (catalog exports, seller re-uploads). A content hash of the raw image bytes as cache key catches exact duplicates. Redis with 7-day TTL, and a ~40% hit rate assumed throughout this study — reduces GPU load by 40%. (Prefer SHA-256 over MD5 for the key; MD5 collisions are constructible by an attacker who controls the uploaded bytes. See the cache-key question in Additional Interview Questions.)
 
@@ -319,7 +319,7 @@ def two_phase_finetune(
     return model
 ```
 
-### ONNX Export and TorchServe Handler
+### ONNX Export and Triton Python-Backend Model
 
 ```python
 import torch
@@ -378,62 +378,183 @@ def export_to_onnx(
           f"throughput={throughput:.0f} img/sec")
 
 
-# TorchServe Handler (save as efficientnet_handler.py)
-TORCHSERVE_HANDLER = '''
-import torch
-import torchvision.transforms as transforms
-from ts.torch_handler.base_handler import BaseHandler
-from PIL import Image
+```
+
+The exported ONNX graph is compiled to a TensorRT engine (optimization profile batch 1-64) and served by NVIDIA Triton Inference Server. The serving unit is two models in one Triton model repository: a **TensorRT model** that only runs the network, and a **Python-backend model** that decodes JPEG bytes, normalizes, calls the TensorRT model through Business Logic Scripting (BLS), and formats the top-5 response. Clients call only the Python model.
+
+```text
+model_repository/
+├── product_classifier/          # Python backend: decode + normalize + top-5
+│   ├── config.pbtxt
+│   └── 1/model.py
+└── efficientnet_b3_trt/         # TensorRT backend: the network only
+    ├── config.pbtxt
+    └── 1/model.plan
+```
+
+```protobuf
+# product_classifier/config.pbtxt
+name: "product_classifier"
+backend: "python"
+max_batch_size: 64                  # the dynamic batcher never forms a batch larger than this
+input  [ { name: "IMAGE"       data_type: TYPE_STRING dims: [ 1 ] } ]   # raw JPEG bytes
+output [ { name: "PREDICTIONS" data_type: TYPE_STRING dims: [ 1 ] } ]   # JSON per image
+instance_group [ { count: 4 kind: KIND_CPU } ]   # each instance is its own stub process,
+                                                 # so 4 instances decode JPEGs in parallel
+dynamic_batching {
+  max_queue_delay_microseconds: 5000             # hold a request at most 5 ms to fill a batch
+  default_queue_policy {
+    max_queue_size: 5000                         # bounded queue: shed load instead of OOM (Failure 1)
+    timeout_action: REJECT
+    default_timeout_microseconds: 40000          # a request older than 40 ms cannot meet the SLA
+  }
+}
+
+# efficientnet_b3_trt/config.pbtxt
+name: "efficientnet_b3_trt"
+platform: "tensorrt_plan"
+max_batch_size: 64
+input  [ { name: "image"  data_type: TYPE_FP32 dims: [ 3, 224, 224 ] } ]
+output [ { name: "logits" data_type: TYPE_FP32 dims: [ 1000 ] } ]
+instance_group [ { count: 2 kind: KIND_GPU } ]
+dynamic_batching { }                 # merges BLS calls from the 4 Python instances, no added delay
+```
+
+```python
+# product_classifier/1/model.py — Triton Python backend
+from __future__ import annotations
+
 import io
 import json
-import base64
+
+import numpy as np
+from PIL import Image
+
+MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
 
 
-class EfficientNetHandler(BaseHandler):
-    """Custom TorchServe handler for product image classification."""
+def preprocess(jpeg: bytes) -> np.ndarray:
+    """Resize short side to 256, centre-crop 224, scale to [0, 1], normalize -> (3, 224, 224)."""
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    w, h = img.size
+    scale = 256 / min(w, h)
+    img = img.resize((round(w * scale), round(h * scale)), Image.BILINEAR)
+    w, h = img.size
+    left, top = (w - 224) // 2, (h - 224) // 2
+    img = img.crop((left, top, left + 224, top + 224))
+    arr = np.asarray(img, dtype=np.float32).transpose(2, 0, 1) / 255.0
+    return (arr - MEAN) / STD
 
-    TRANSFORMS = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-    ])
 
-    def preprocess(self, requests):
-        """Decode images from base64 or bytes, apply transforms, batch."""
-        images = []
-        for req in requests:
-            body = req.get("body", req.get("data", b""))
-            if isinstance(body, str):
-                body = base64.b64decode(body)
-            img = Image.open(io.BytesIO(body)).convert("RGB")
-            images.append(self.TRANSFORMS(img))
-        return torch.stack(images).to(self.device)
+def top5_json(logits: np.ndarray) -> list[bytes]:
+    """Softmax each row and return one JSON document (as bytes) per image."""
+    z = logits - logits.max(axis=1, keepdims=True)          # numerically stable softmax
+    probs = np.exp(z) / np.exp(z).sum(axis=1, keepdims=True)
+    out: list[bytes] = []
+    for row in probs:
+        idx = np.argsort(row)[::-1][:5]
+        out.append(json.dumps({
+            "category_id": int(idx[0]),
+            "confidence": float(row[idx[0]]),
+            "top5": [{"category_id": int(i), "confidence": float(row[i])} for i in idx],
+        }).encode())
+    return out
 
-    def inference(self, inputs):
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
-            logits = self.model(inputs)
-        return torch.softmax(logits, dim=-1)
 
-    def postprocess(self, probs):
-        """Return top-5 predictions with confidence scores."""
-        results = []
-        for prob_row in probs:
-            top5 = torch.topk(prob_row, k=5)
-            results.append({
-                "category_id": int(top5.indices[0]),
-                "confidence": float(top5.values[0]),
-                "top5": [
-                    {"category_id": int(idx), "confidence": float(conf)}
-                    for idx, conf in zip(top5.indices, top5.values)
-                ],
-            })
-        return results
-'''
+def split_by_request(items: list[bytes], counts: list[int]) -> list[list[bytes]]:
+    """Give each request back exactly the rows it sent, in order."""
+    chunks, start = [], 0
+    for n in counts:
+        chunks.append(items[start:start + n])
+        start += n
+    return chunks
+
+
+try:  # present only inside the Triton container
+    import triton_python_backend_utils as pb_utils
+except ImportError:  # lets the pure functions above be unit-tested anywhere
+    pb_utils = None
+
+
+class TritonPythonModel:
+    def initialize(self, args: dict[str, str]) -> None:
+        self.trt_model = "efficientnet_b3_trt"
+
+    def _run_trt(self, batch: np.ndarray) -> np.ndarray:
+        """One BLS call to the TensorRT model for the whole batch."""
+        req = pb_utils.InferenceRequest(
+            model_name=self.trt_model,
+            requested_output_names=["logits"],
+            inputs=[pb_utils.Tensor("image", batch)],
+        )
+        resp = req.exec()
+        if resp.has_error():
+            raise pb_utils.TritonModelException(resp.error().message())
+        return pb_utils.get_output_tensor_by_name(resp, "logits").as_numpy()
+
+    # BROKEN: Triton's dynamic batcher hands execute() a LIST of up to 64
+    # requests, but the Python backend does not concatenate them for you.
+    # Looping and calling the GPU once per request turns a batch of 64 into
+    # 64 batches of 1: the batcher waited 5 ms for nothing and GPU
+    # utilization falls back to the ~10% of the unbatched design.
+    def execute_broken(self, requests: list) -> list:
+        responses = []
+        for request in requests:
+            raw = pb_utils.get_input_tensor_by_name(request, "IMAGE").as_numpy()
+            batch = np.stack([preprocess(r[0]) for r in raw])
+            preds = top5_json(self._run_trt(batch))      # one GPU call PER REQUEST
+            responses.append(pb_utils.InferenceResponse(output_tensors=[
+                pb_utils.Tensor("PREDICTIONS", np.array(preds, dtype=np.object_).reshape(-1, 1))
+            ]))
+        return responses
+
+    # FIX: decode every image from every request, stack them into ONE tensor,
+    # make ONE GPU call, then split the rows back per request. Return exactly
+    # one response per request, in request order, or Triton fails the batch.
+    def execute(self, requests: list) -> list:
+        images: list[np.ndarray] = []
+        counts: list[int] = []
+        bad: dict[int, str] = {}
+        for i, request in enumerate(requests):
+            raw = pb_utils.get_input_tensor_by_name(request, "IMAGE").as_numpy()
+            try:
+                decoded = [preprocess(r[0]) for r in raw]
+            except Exception as exc:        # one corrupt JPEG must not fail 63 good requests
+                bad[i] = f"undecodable image: {exc}"
+                decoded = []
+            images.extend(decoded)
+            counts.append(len(decoded))
+
+        preds = top5_json(self._run_trt(np.stack(images))) if images else []
+        per_request = split_by_request(preds, counts)
+
+        responses = []
+        for i, rows in enumerate(per_request):
+            if i in bad:
+                responses.append(pb_utils.InferenceResponse(
+                    output_tensors=[], error=pb_utils.TritonError(bad[i])))
+            else:
+                responses.append(pb_utils.InferenceResponse(output_tensors=[
+                    pb_utils.Tensor("PREDICTIONS", np.array(rows, dtype=np.object_).reshape(-1, 1))
+                ]))
+        return responses
+
+    def finalize(self) -> None:
+        pass
+
+
+if __name__ == "__main__":
+    # Offline check of the batching contract without a Triton server.
+    fake_logits = np.random.default_rng(0).normal(size=(5, 1000)).astype(np.float32)
+    rows = top5_json(fake_logits)
+    chunks = split_by_request(rows, [2, 0, 3])
+    assert [len(c) for c in chunks] == [2, 0, 3]
+    assert json.loads(chunks[2][0])["category_id"] == int(np.argmax(fake_logits[2]))
+    print("batching contract OK")
 ```
+
+Three things in this model carry the latency SLA. (1) **One GPU call per `execute()`**, not per request: the Python backend receives the batcher's requests as a list and leaves concatenation to you. (2) **Preprocessing on CPU instances, inference on GPU instances**: JPEG decode is the CPU-bound step, so 4 CPU stub processes keep 2 GPU engine instances fed; putting decode on the GPU instance serializes it in front of the engine. (3) **A bounded queue with a timeout**: `max_queue_size` and `default_timeout_microseconds` turn an overload into fast `REJECT`s the API gateway can answer from the cache fallback, instead of an unbounded backlog (see Failure 1). The same two-model split also works without Python: a Triton **ensemble** with a DALI preprocessing model avoids the Python stub entirely at the cost of a less flexible preprocessing language. BentoML, KServe (with Triton as its predictor runtime) and Ray Serve are the managed-wrapper alternatives; see the Tradeoffs table.
 
 ### Drift Detection
 
@@ -515,7 +636,7 @@ class ImageDriftDetector:
 | Augmentation | torchvision transforms + Mixup | Regularization, reduce overfitting |
 | Model Registry | MLflow | Versioning, metric tracking, artifact storage |
 | Export | torch.onnx.export (opset 17) | Cross-platform deployment artifact |
-| Inference Runtime | TorchServe + TensorRT | Dynamic batching, GPU serving |
+| Inference Runtime | NVIDIA Triton Inference Server (Python backend + TensorRT backend) | Dynamic batching, BLS preprocessing, GPU serving |
 | Caching | Redis (MD5 key, 7-day TTL) | Duplicate image request deduplication |
 | Drift Detection | KS test + confidence monitoring | Distribution shift alerting |
 | Data Versioning | DVC (Data Version Control) | Reproducible training datasets |
@@ -528,7 +649,7 @@ class ImageDriftDetector:
 |----------|--------|-------------|-----------|
 | Model architecture | EfficientNet-B3 | ViT-B/16, ResNet-50 | EfficientNet-B3: best accuracy/latency tradeoff at 12M params; ViT needs more data |
 | Fine-tuning strategy | Two-phase (freeze → unfreeze) | Full fine-tuning from epoch 1 | Two-phase prevents an untrained head's large gradients from destroying pretrained features; the accuracy delta is real but unquantified here — measure it on your own catalog |
-| Inference server | TorchServe | Triton Inference Server, Ray Serve | TorchServe: native PyTorch integration, simpler ops; Triton better for multi-framework |
+| Inference server | Triton Inference Server | Ray Serve, BentoML, KServe | Triton: server-side dynamic batching with a per-model queue delay, a native TensorRT backend, and a Python backend for preprocessing in one process tree. Ray Serve batches in Python (`@serve.batch`) and suits multi-model Python pipelines; BentoML gives the simplest packaging; KServe is the Kubernetes control plane and can run Triton as its predictor, so it complements rather than replaces it |
 | Precision | BF16 | FP16, INT8 | BF16: larger dynamic range than FP16 (fewer NaN issues), A100-native; INT8 needs calibration |
 | Caching key | MD5 of raw image bytes | Perceptual hash (pHash) | MD5 catches exact duplicates (most common case); pHash catches near-duplicates at 3x cost |
 | New category strategy | Prototypical networks (few-shot) | Full retraining | Prototypical: deploy in hours with 5 examples; full retrain takes 2 days |
@@ -538,7 +659,7 @@ class ImageDriftDetector:
 ## Interview Discussion Points
 
 **Q: How do you handle the 100K QPS requirement with <50ms P99?**
-Three mechanisms work together: (1) Redis caching with MD5 key deduplicates ~40% of requests, reducing effective QPS to 60K. (2) Dynamic batching in TorchServe accumulates requests for 5ms and processes as a batch of 64, increasing GPU utilization from 10% to 80%. With 20 GPU nodes carrying 3K effective QPS each, the fleet absorbs the 60K post-cache load at roughly 37% of its assumed per-node ceiling. (3) Horizontal auto-scaling (K8s HPA on GPU utilization metric): scale from 20 to 40 nodes in 3 minutes if load spikes. The 50ms budget breaks down as: network 5ms + preprocessing 5ms + Redis lookup 1ms + batching wait 5ms + GPU inference 15ms + response serialization 2ms = 33ms P50, with 17ms tail latency headroom.
+Three mechanisms work together: (1) Redis caching with MD5 key deduplicates ~40% of requests, reducing effective QPS to 60K. (2) Triton's dynamic batcher holds requests for at most `max_queue_delay_microseconds: 5000` and sends them as one batch of up to 64 (immediately if 64 arrive sooner), increasing GPU utilization from 10% to 80%. With 20 GPU nodes carrying 3K effective QPS each, the fleet absorbs the 60K post-cache load at roughly 37% of its assumed per-node ceiling. (3) Horizontal auto-scaling (K8s HPA on GPU utilization metric): scale from 20 to 40 nodes in 3 minutes if load spikes. The 50ms budget breaks down as: network 5ms + preprocessing 5ms + Redis lookup 1ms + batching wait 5ms + GPU inference 15ms + response serialization 2ms = 33ms P50, with 17ms tail latency headroom.
 
 **Q: How do you detect and respond to model drift in production?**
 Two-tier monitoring: (1) Pixel-level drift — track per-channel mean/std of incoming images hourly. KS test against the baseline distribution (collected during model launch). PSI > 0.2 or p < 0.05 triggers a Slack alert and automatic shadow deployment of a candidate retrained model. (2) Quality drift — 100 images/day are sampled and human-labeled by QA. If rolling 7-day accuracy drops below 92%, trigger emergency retraining. Confidence distribution monitoring provides an early warning signal: if the fraction of predictions with confidence <0.5 doubles, this indicates OOD (out-of-distribution) inputs before ground truth labels are even available.
@@ -552,9 +673,9 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 
 *The three incidents below are illustrative composites of recurring failure patterns, not accounts of specific public incidents. The mechanisms and remediations are real; the QPS spikes, accuracy deltas and time-to-detect figures are representative and should not be quoted as measured public record.*
 
-### Failure 1: TorchServe OOM Under Burst Traffic
+### Failure 1: Triton Queue Saturation Under Burst Traffic
 
-**What failed:** A major promotional event drove 250K QPS (2.5x the designed 100K QPS) over a 20-minute window. K8s HPA was configured to scale on CPU utilization, but GPU nodes take 6-8 minutes to provision and warm up (download model artifact from S3, initialize TorchServe workers). During the scale-out window, existing 20 GPU nodes became memory-saturated — dynamic batching accumulated requests faster than GPU could process them. TorchServe batch queue hit maximum (10K pending requests), triggering request rejection (HTTP 503). 35% of classification requests returned errors for 12 minutes.
+**What failed:** A major promotional event drove 250K QPS (2.5x the designed 100K QPS) over a 20-minute window. K8s HPA was configured to scale on CPU utilization, but GPU nodes take 6-8 minutes to provision and warm up (download model artifact from S3, load the TensorRT engine and start the Python-backend stub processes). During the scale-out window, existing 20 GPU nodes became memory-saturated — dynamic batching accumulated requests faster than GPU could process them. The model's dynamic-batcher queue, configured with no `max_queue_size` and therefore unbounded, grew past 10K pending requests; requests timed out at the gateway after already waiting longer than the SLA, and the gateway returned HTTP 503. 35% of classification requests returned errors for 12 minutes.
 
 **Detection:** HTTP 503 rate alert fired at 2% error rate (threshold). GPU memory utilization alerts were already firing at 95% for 8 minutes before the scale-out completed. Time-to-detect: 2 minutes (HTTP error alert).
 
@@ -562,7 +683,7 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 1. Repointed the HPA metric from CPU utilization to GPU utilization (CPU is a poor proxy on an inference node — the GPU saturates while CPU looks idle), raised max replicas from 20 to 40, and set the scale-up threshold at 50% GPU utilization.
 2. Added predictive scaling: integration with promotions calendar API — when a promotion starts, pre-scale to 30 nodes 15 minutes beforehand.
 3. Increased Redis cache TTL from 7 days to 14 days during promotional windows to increase cache hit rate from 40% to 55%, reducing effective QPS by an additional 15%.
-4. Added request shedding in API gateway: if TorchServe queue > 5K, return cached predictions from lower-confidence fallback (Redis nearest-neighbor lookup) rather than HTTP 503.
+4. Bounded the Triton queue (`default_queue_policy { max_queue_size: 5000 timeout_action: REJECT default_timeout_microseconds: 40000 }`) and added request shedding in the API gateway: on a Triton reject, return cached predictions from lower-confidence fallback (Redis nearest-neighbor lookup) rather than HTTP 503.
 
 **Prevention:** Load test at 3x expected peak before each major promotional event. Pre-scale to 1.5x normal capacity 30 minutes before event start based on promotions calendar.
 
@@ -660,7 +781,7 @@ Total monthly training cost: ~$977
 ### Serving Infrastructure
 
 ```
-TorchServe GPU Cluster (100K QPS, <50ms P99):
+Triton GPU Cluster (100K QPS, <50ms P99):
   Effective QPS after 40% cache hit: 60K QPS
   Each GPU (A10G): ASSUME 8,000 images/sec at batch_size=64 with a TensorRT
     INT8 engine. This is a planning assumption, not a published benchmark —
@@ -771,23 +892,38 @@ def train_epoch_correct_bf16(
 **War Story 2 — Dynamic Batch Size Causing Inconsistent P99 Latency:**
 
 ```python
-# BROKEN: Dynamic batching with max_delay=50ms (too long)
-# At 100K QPS, batches fill to max_batch=64 in <1ms
-# But at 5K QPS (off-peak), batches wait 50ms before sending
-# P99 becomes 50ms + 15ms inference = 65ms — exceeds SLA
-
-# TorchServe config.properties (BROKEN):
-# batch_size=64
-# max_batch_delay=50   # too long for off-peak traffic
-
-# FIX: Reduce max_batch_delay; use adaptive batching based on queue depth
-# At high QPS: queue fills fast, batching delay is near 0
-# At low QPS: smaller batches are sent sooner
-
-# TorchServe config.properties (FIXED):
-# batch_size=64
-# max_batch_delay=5    # 5ms max wait — acceptable at all traffic levels
-
+# BROKEN: Triton dynamic batcher with a 50 ms queue delay (too long)
+# The batcher sends a batch the moment it reaches max_batch_size, so the delay
+# only bites when traffic is too light to fill 64 slots:
+#   peak, 5,000 req/s per node: 64 requests arrive in 12.8 ms  -> batch sent at 12.8 ms
+#   off-peak, 500 req/s per node: 64 requests need 128 ms     -> the 50 ms timer fires first
+# Off-peak, the oldest request in every batch waits the full 50 ms:
+#   P99 = 50 ms queue + 15 ms inference = 65 ms, over the 50 ms SLA, at the
+#   time of day with the LEAST load. Peak-hour load tests never see it.
+#
+# product_classifier/config.pbtxt (BROKEN):
+#   max_batch_size: 64
+#   dynamic_batching { max_queue_delay_microseconds: 50000 }   # 50 ms
+#
+# FIX: cap the delay at what the latency budget can spend (5 ms of the 50 ms),
+# and bound the queue so overload becomes a fast REJECT instead of a backlog.
+#   peak: unchanged, batches still fill to 64 before the timer matters
+#   off-peak: batches of ~3 (500 req/s x 5 ms) leave every 5 ms, P99 ~ 20 ms
+#
+# product_classifier/config.pbtxt (FIXED):
+#   max_batch_size: 64
+#   dynamic_batching {
+#     max_queue_delay_microseconds: 5000                        # 5 ms
+#     default_queue_policy {
+#       max_queue_size: 5000
+#       timeout_action: REJECT
+#       default_timeout_microseconds: 40000
+#     }
+#   }
+#
+# Tune it with Triton's perf_analyzer at BOTH ends of the daily curve, e.g.
+#   perf_analyzer -m product_classifier --request-rate-range=500:5000:1500
+# and read p99 per rate, not one number at peak.
 # Additionally: add a health-check to verify actual P99 after config change
 
 import asyncio

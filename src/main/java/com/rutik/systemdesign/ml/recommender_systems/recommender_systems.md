@@ -540,6 +540,24 @@ Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% an
 
 **Pitfall 5 — Ignoring session context**: Recommending winter coats to a user who just purchased a winter coat. The model saw "user likes winter coats" and kept recommending more. Fix: add a recency decay or a "diversity from purchased items" constraint in re-ranking.
 
+**Pitfall 2 as code: a random split of the interaction log.**
+
+```python
+# BROKEN: the model trains on interactions that happen after the ones it is tested on
+from sklearn.model_selection import train_test_split
+
+train, test = train_test_split(log, test_size=0.2, random_state=0)
+```
+
+```python
+# FIX: a global temporal split -- train before the cutoff, test after it
+cutoff = log["ts"].quantile(0.8)
+train, test = log[log["ts"] < cutoff], log[log["ts"] >= cutoff]
+warm = test[test["user_id"].isin(train["user_id"]) & test["item_id"].isin(train["item_id"])]
+```
+
+A random split lets the model see a user's later interactions and item popularity from the future, so recall@k can be several times higher than a temporal split gives. Report warm and cold slices separately: `warm` measures ranking quality for known users and items, and the remaining test rows measure the cold-start path, which a random split hides almost completely.
+
 ---
 
 ## 11. Technologies & Tools

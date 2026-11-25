@@ -836,6 +836,29 @@ Training is `6 / 30 = 20%` of the elapsed time. **The other 80% is scheduling ri
 
 **Why the cadence choice is a cost tradeoff and not a preference.** Section 8 pairs full retraining with a daily-or-weekly cadence and incremental updates with hourly-or-continuous, and Section 12 gives the reason: a full retrain is expensive per run, so it can only be afforded rarely, while a warm start converges in minutes and can be afforded often. Picking a cadence is therefore picking how much staleness the business metric tolerates between runs, then buying the cheapest retraining strategy that fits in that window — which is why Section 9 flags "retraining takes more than 24 hours for a model that should retrain daily" as a design failure: the run no longer fits inside its own interval.
 
+**Global preprocessing as code: the scaler sees the test rows.**
+
+```python
+# BROKEN: fit the scaler on every row, then split
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+X_scaled = StandardScaler().fit_transform(X)
+X_tr, X_te, y_tr, y_te = train_test_split(X_scaled, y, test_size=0.2, random_state=0)
+```
+
+```python
+# FIX: split first; a Pipeline fits every preprocessing step on training rows only
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=0)
+pipe = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)).fit(X_tr, y_tr)
+print(pipe.score(X_te, y_te))
+```
+
+For a scaler the leak is small; for target encoding, imputation from global statistics or feature selection on all rows it can add several points of AUC. The broken version raises nothing, and the inflated score is the one that goes into the launch review. A Pipeline also makes cross-validation correct, because `cross_val_score` refits every step inside each fold.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1038,3 +1061,34 @@ Two things fall out. First, the loop closes in `4h50m` against a 24-hour interva
 **Why the row floor sits at 150M and not 200M.** A hard equality check would fail on every normal day, since event volume swings with traffic. Setting the floor at `150 / 200 = 75%` of expected tolerates ordinary variation while still catching the failure that matters — a partition that only half-landed. The gap between the floor and the expectation is the daily volume noise the team is willing to call normal.
 
 **Outcome** (a worked illustration of this design, not a reported deployment — the figures below are constructed to be internally consistent with the pipeline above, and no company published them): daily retraining keeps CTR 4% above a weekly-retrained baseline. Pipeline succeeds 94% of runs; 6% failures are caught by validation gates (mostly data quality issues from upstream pipeline), never reaching production. Mean time from trigger to full rollout: 4.8 hours, matching the stage-by-stage sum above.
+
+**BROKEN → FIX: the "+0.003 AUC with p < 0.05" gate compared across two different test sets.** Step 4's gate is only meaningful if both models are scored on the same rows.
+
+```python
+from sklearn.metrics import roc_auc_score
+
+# BROKEN: candidate scored on today's test days, champion's AUC copied from last night's run log
+def gate_broken(y_test, p_candidate, champion_auc_logged: float) -> bool:
+    return roc_auc_score(y_test, p_candidate) - champion_auc_logged >= 0.003
+# yesterday's and today's test windows differ in traffic mix; day-to-day AUC noise alone
+# can exceed 0.003, so the gate passes and fails on the calendar, not on the model
+```
+
+```python
+import numpy as np
+
+
+# FIX: score BOTH models on the same rows today, bootstrap the paired difference
+def gate_paired(y: np.ndarray, p_new: np.ndarray, p_old: np.ndarray, min_gain: float = 0.003,
+                n_boot: int = 1_000, seed: int = 0) -> bool:
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    deltas = np.empty(n_boot)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, n)        # the same resampled rows for both models
+        deltas[b] = roc_auc_score(y[idx], p_new[idx]) - roc_auc_score(y[idx], p_old[idx])
+    lower_95 = float(np.percentile(deltas, 5))          # one-sided 95% lower bound
+    return bool(deltas.mean() >= min_gain and lower_95 > 0.0)
+```
+
+Pairing removes the variance that the two models share (the same hard and easy rows), which is most of it, so a real 0.003 gain becomes detectable and a fake one stops passing. Bootstrapping 1,000 AUCs over the full 400M-row test window is too slow for a 15-minute gate stage: run it on a fixed random sample of 1-2M rows, or use DeLong's test for correlated ROC curves, which gives the paired variance in closed form.

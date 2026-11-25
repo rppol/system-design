@@ -1234,8 +1234,7 @@ class DDPMTrainer:
 ```
 
 ```python
-import torchvision.models as vision_models
-from torchvision.models.inception import inception_v3
+from torchvision.models import Inception_V3_Weights, inception_v3
 from scipy.linalg import sqrtm
 
 def compute_fid(
@@ -1245,7 +1244,7 @@ def compute_fid(
     batch_size: int = 64,
 ) -> float:
     """Frechet Inception Distance using InceptionV3 pool3 features."""
-    inception = inception_v3(pretrained=True, transform_input=False)
+    inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1, transform_input=False)
     inception.fc = nn.Identity()   # use pool3 features (2048d)
     inception = inception.to(device).eval()
 

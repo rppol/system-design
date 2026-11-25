@@ -1427,3 +1427,50 @@ abstract_ratios = [abstractiveness_ratio(s, src) for s, src in zip(summaries, so
 3. **NER JURISDICTION F1=0.58**: Jurisdictions specified as state abbreviations ("NY law applies") were missed — model was trained primarily on full-name jurisdictions. Fix: augmented with 500 abbreviation examples using template-based augmentation: "[STATE_ABBR] law applies" + full name variants.
 
 4. **Summarization abstractiveness=0.12**: ROUGE optimization led to extractive copying. Fix: added coverage penalty to training + ROUGE-L recall weighting. BERTScore increased more than ROUGE-2 (0.04 vs 0.03), confirming the extractive copying was masking semantic quality.
+
+**BROKEN → FIX: measuring calibration on the examples the temperature was fit to.** Fix 1 above reports ECE 0.19 → 0.03 from temperature scaling on 200 examples; that number is only trustworthy if the 200 are not also the evaluation set.
+
+```python
+import torch
+import torch.nn.functional as F
+
+
+def fit_temperature(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    log_t = torch.zeros(1, requires_grad=True)               # optimise log T so T stays positive
+    opt = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
+
+    def closure() -> torch.Tensor:
+        opt.zero_grad()
+        loss = F.cross_entropy(logits / log_t.exp(), labels)  # minimise NLL, not ECE
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    return float(log_t.exp())
+
+
+def ece(probs: torch.Tensor, labels: torch.Tensor, n_bins: int = 15) -> float:
+    conf, pred = probs.max(dim=1)
+    correct = (pred == labels).float()
+    edges = torch.linspace(0.0, 1.0, n_bins + 1)
+    total = 0.0
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        in_bin = (conf > lo) & (conf <= hi)
+        if in_bin.any():
+            gap = (conf[in_bin].mean() - correct[in_bin].mean()).abs()
+            total += float(in_bin.float().mean() * gap)
+    return total
+
+
+# BROKEN: fit T and report ECE on the same 200 examples
+t = fit_temperature(cal_logits, cal_labels)
+print(ece(torch.softmax(cal_logits / t, dim=-1), cal_labels))   # optimistic, and noisy at n=200
+```
+
+```python
+# FIX: the 200 examples only fit T; ECE is read on a separate test set drawn from production traffic
+t = fit_temperature(cal_logits, cal_labels)
+print(f"T={t:.2f}  ECE={ece(torch.softmax(test_logits / t, dim=-1), test_labels):.3f}")
+```
+
+With 200 examples spread over 15 confidence bins, several bins hold a handful of points, so in-sample ECE is both biased toward the fit and highly variable; reading it on a few thousand held-out production examples gives a number that can gate a release. Fitting on NLL rather than ECE also matters: ECE is piecewise constant in T and a poor optimisation target.

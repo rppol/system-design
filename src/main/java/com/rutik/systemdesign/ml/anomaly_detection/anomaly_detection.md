@@ -55,6 +55,17 @@ The output is almost always a continuous **anomaly score**, not a binary label. 
 6. **Thresholds drift; make them adaptive.** A quantile learned last month becomes an alert-storm or a silence after the traffic distribution moves. Use rolling quantiles / EWMA and monitor them — see [`../monitoring_and_drift_detection/monitoring_and_drift_detection.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md).
 7. **Explainability is often mandatory.** Fraud declines and infra pages need reason codes ("feature 12 was 8σ high"). Prefer methods whose score decomposes per-feature, or wrap black-box scorers with SHAP.
 
+**Why principle 4 holds — the base-rate arithmetic.** Precision is set by Bayes' rule, not by how good the ROC curve looks:
+
+```
+precision = recall x base_rate / (recall x base_rate + FPR x (1 - base_rate))
+
+base_rate = 0.1%, recall = 90%, FPR = 1%   (a point that looks excellent on an ROC plot)
+precision = 0.9 x 0.001 / (0.9 x 0.001 + 0.01 x 0.999) = 0.00090 / 0.01089 = 8.3%
+```
+
+At 1M scored events a day that is about 900 true anomalies and 9,990 false alarms, so 11 of every 12 pages are noise, while accuracy reads 99.0% and the ROC point reads "90% recall at 1% FPR". Only a metric that conditions on the alert (precision, precision@k) exposes it, and the lever that moves it is FPR: at FPR 0.1% the same detector reaches 0.0009 / (0.0009 + 0.000999) = 47% precision.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -991,6 +1002,40 @@ Isolation Forest and tree-based detectors handle mixed types well after simple e
 4. **Policy / thresholding layer.** Every raw score is mapped to a rolling p99.9 quantile of that metric's recent clean history (not a constant), then gated by a 5-minute cooldown and correlated-alert deduplication. The threshold is the tunable knob operators move to trade precision for recall against the 0.1% false-positive budget.
 
 **Evaluation.** Offline, on a labeled incident replay, the team reports **PR-AUC and precision@k** (k = the daily on-call alert budget), plus recall on amplitude anomalies > 3σ (target > 95%). Accuracy and bare ROC-AUC are explicitly banned from the scorecard — at 0.1% incident rate they read ~0.999 and 0.99 respectively while hiding the true precision. Thresholds are re-fit weekly with online updates for drift, and the flag-rate itself is monitored: a tripling means either a real outage or a drifted threshold.
+
+**BROKEN → FIX: one constant threshold, and a baseline that learns from the incident.** Layer 4 is where most real false-alarm storms start.
+
+```python
+# BROKEN: one global cut-off for every metric's anomaly score
+def is_anomaly(score: float) -> bool:
+    return score > 3.0   # pages all night on a noisy metric, never fires on a quiet one
+```
+
+```python
+from collections import deque
+
+import numpy as np
+
+
+# FIX: per-metric rolling quantile, fed only by points that were NOT flagged
+class RollingQuantileThreshold:
+    def __init__(self, window: int = 10_080, q: float = 0.999, warmup: int = 1_440) -> None:
+        self.history: deque[float] = deque(maxlen=window)   # 7 days of 1-minute scores
+        self.q = q
+        self.warmup = warmup                                  # 1 day before the first alert
+
+    def update_and_check(self, score: float) -> bool:
+        if len(self.history) < self.warmup:
+            self.history.append(score)
+            return False
+        threshold = float(np.quantile(self.history, self.q))
+        flagged = score > threshold
+        if not flagged:
+            self.history.append(score)   # an ongoing incident cannot raise its own threshold
+        return flagged
+```
+
+At `q = 0.999` each metric flags about 1 in 1,000 clean points, which is the 0.1% false-positive budget by construction rather than by hand-tuning, and excluding flagged points stops a 30-minute outage from dragging the threshold up until it silences itself. The cost of that exclusion is that a genuine level shift (a new, permanently higher baseline after a deploy) keeps firing until someone re-seeds the history, so pair it with the CUSUM drift layer and a manual "accept new baseline" action. Recomputing the quantile over 10,080 points per sample is fine for one metric; at 100K metrics/second use a streaming quantile sketch such as t-digest instead.
 
 **Related.** For the fraud analog of the same score-then-threshold, rules+supervised+unsupervised stack, see [`../case_studies/design_fraud_detection.md`](../case_studies/design_fraud_detection.md); for the drift-monitoring machinery that keeps thresholds honest, see [`../monitoring_and_drift_detection/monitoring_and_drift_detection.md`](../monitoring_and_drift_detection/monitoring_and_drift_detection.md); for the calibration/thresholding primitive shared across classification case studies, see [`../case_studies/cross_cutting/model_calibration_and_thresholding.md`](../case_studies/cross_cutting/model_calibration_and_thresholding.md).
 

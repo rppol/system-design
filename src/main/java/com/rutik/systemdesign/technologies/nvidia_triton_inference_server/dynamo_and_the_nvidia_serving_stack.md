@@ -1,12 +1,13 @@
 # Dynamo and the NVIDIA Serving Stack
 
-> **Version anchor (2026-10-19).** NVIDIA Dynamo **v1.5.1** (released 2026-10-07,
-> `github.com/ai-dynamo/dynamo`), building on the **Dynamo 1.0** production-grade release
-> announced at GTC 2026. Dynamo v1.5.0 (2026-09-21) deprecated the KV Block Manager (KVBM)
-> with removal targeted for v1.7.0, removed the Go Endpoint Picker in favour of the Rust EPP,
-> and renamed AIConfigurator to AISimulate. TensorRT-LLM **1.2.x** (official release-notes
-> page, top entry "TensorRT-LLM Release 1.2"). Triton NGC container **26.09-py3** (server
-> release 2.73.0, 2026-09-30); NVIDIA ships a new monthly tag, so check
+> **Version anchor (2026-11-25).** NVIDIA Dynamo **v1.7.0** (released 2026-11-24,
+> `github.com/ai-dynamo/dynamo`) is the latest release; the mechanics on this page were written
+> against **v1.5.1** (2026-10-07) and build on the **Dynamo 1.0** production-grade release
+> announced at GTC 2026. Dynamo v1.5.0 (2026-09-21) deprecated the KV Block Manager (KVBM),
+> removed the Go Endpoint Picker in favour of the Rust EPP, and renamed AIConfigurator to
+> AISimulate; v1.7.0 no longer builds or ships KVBM. TensorRT-LLM **1.2.x** (official release-notes
+> page, top entry "TensorRT-LLM Release 1.2"). Triton NGC container **26.11-py3** (server
+> release 2.75.0, 2026-11-17); NVIDIA ships a new monthly tag, so check
 > `catalog.ngc.nvidia.com` before pinning. NVIDIA's own product page brands the
 > classic server **"NVIDIA Dynamo-Triton"** — the Dynamo *platform* name applied to the
 > Triton *product* — a naming umbrella, not a replacement. Tag version-specific behavior
@@ -294,16 +295,19 @@ fallback** (works anywhere, slowest), **NVMe-oF** (spilling to fast local storag
 non-blocking GPU-to-GPU handoff — no trip through host DRAM, no request-response
 round-trip, just a direct write into the decode worker's cache pool.
 
-### 6.3 KV-Cache Tiering and the KVBM Deprecation
+### 6.3 KV-Cache Tiering After KVBM
 
 GPU HBM is the fastest and smallest place to hold KV cache; not every active or
 recently-used conversation fits. The answer is a tiered hierarchy, **GPU HBM, then host
 DRAM, then NVMe or object storage**: cold blocks are evicted downward and a block is
 promoted back to HBM when a request needs it again. Dynamo shipped this as the **KV Block
-Manager (KVBM)**, which Dynamo v1.5.0 (2026-09-21) deprecated with removal targeted for
-v1.7.0. The v1.5.0 migration note points host and disk tiering at the inference engine's
-native KV offloading (vLLM, SGLang, TensorRT-LLM), and scopes cross-node KV sharing to the
-separate, early-stage KV Cache Runner project, which does not replace KVBM. This
+Manager (KVBM)**, which Dynamo v1.5.0 (2026-09-21) deprecated and v1.7.0 (2026-11-24) stopped
+building and shipping: the KVBM wheel and crates are gone from the container images. Host and
+disk tiering now belong to the inference engine's native KV offloading (vLLM, SGLang,
+TensorRT-LLM); disaggregated LMCache and FlexKV deployments point at
+`dynamo.vllm.pd_connector`, which now holds the prefill-decode connector that used to ship in
+the KVBM wheel; and cross-node KV sharing is scoped to the separate, early-stage KV Cache Runner
+project, which does not replace KVBM. This
 is the mechanism that makes a KV-cache "hit" possible even for a conversation that has been
 idle for minutes: the block did not have to survive in the fastest tier the whole time, it
 only had to survive *somewhere* Dynamo knows how to find and re-fetch quickly.
@@ -329,6 +333,60 @@ traffic — because neither pool is now running a batching policy tuned for the 
 phase's opposite profile. Treat any specific multiplier as workload- and hardware-specific;
 measure it on your own traffic shape before committing to the extra operational cost (see
 §9).
+
+On Kubernetes the whole split is one `DynamoGraphDeployment` (DGD) custom resource that the
+Dynamo Operator turns into pods. This is the shape of the `vllm/deploy/disagg.yaml` example
+shipped with Dynamo v1.7.0 (`apiVersion: nvidia.com/v1beta1`), trimmed to the fields that
+carry the design; the `hf-token-secret` Secret and the `ephemeral-storage` request are left out:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  components:
+  - name: Frontend                 # OpenAI-compatible HTTP API plus the router
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+  - name: prefill                  # compute-bound pool: one wide forward pass per prompt
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill",
+                 "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}']
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+  - name: decode                   # bandwidth-bound pool: receives the KV cache over NIXL
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "decode",
+                 "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}']
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+```
+
+The `kv_role` pair is the handoff in step 3: the prefill pool is the KV producer, the decode
+pool the consumer, and `NixlConnector` is the transport. Because `prefill` and `decode` are
+separate components with separate `replicas`, the Planner (§6.5) can scale one without the
+other. The aggregated variant (`agg.yaml`) is the same resource with a single `worker`
+component and no `--disaggregation-mode` flag, which is the baseline to benchmark against.
 
 ### 6.5 The SLO Planner
 
@@ -430,6 +488,32 @@ Whichever tool you use, benchmark on **token-level metrics**, not request latenc
 Benchmarking a streaming LLM endpoint with a generic HTTP load tool reports one latency
 number that conflates all four, which is precisely the gap GenAI-Perf (and now AIPerf) was
 built to close — see the war story in §10 for what that conflation costs in practice.
+
+A minimal AIPerf run against the Dynamo Frontend from the §6.4 manifest, after
+`kubectl port-forward` of the frontend Deployment to local port 8000 (find its name with
+`kubectl get deploy -n <namespace>`):
+
+```bash
+pip install aiperf
+aiperf profile \
+  --model Qwen/Qwen3-0.6B \
+  --url localhost:8000 \
+  --endpoint-type chat \
+  --streaming \
+  --synthetic-input-tokens-mean 2000 --synthetic-input-tokens-stddev 400 \
+  --output-tokens-mean 200 \
+  --concurrency 32 \
+  --request-count 1000
+```
+
+`--streaming` is what makes TTFT and ITL measurable at all; without it the client sees one
+response and can report only request latency. The input and output means here (2,000 in,
+200 out) are illustrative: replace them with the token-length distribution sampled from your
+own traffic. AIPerf's own docs warn that `--output-tokens-mean` is not guaranteed unless the
+server honors `ignore_eos` or `min_tokens` passed through `--extra-inputs`, so check the
+reported output lengths before comparing two runs. Run the identical command against the
+aggregated and the disaggregated deployment, at several `--concurrency` values, and compare
+TTFT and ITL at the same output-token throughput.
 
 ---
 
@@ -583,7 +667,7 @@ the list only when you have the traffic and the measurements to justify it.
 | Dynamo SLO Planner | Autoscaler that sizes prefill and decode replica counts to hit TTFT/ITL latency targets. |
 | Dynamo KV Router | Routes requests by KV-cache overlap score instead of round-robin, minimizing redundant recompute. |
 | NIXL | Low-latency transfer library moving KV-cache blocks GPU-to-GPU across RDMA, RoCE, TCP, NVMe-oF or S3. |
-| Dynamo KV Block Manager | Tiered KV-cache block manager (HBM, DRAM, cold storage); deprecated in v1.5.0, removal targeted for v1.7.0. |
+| Dynamo KV Block Manager | Tiered KV-cache block manager (HBM, DRAM, cold storage); deprecated in v1.5.0 and no longer built or shipped from v1.7.0. |
 | Grove | Kubernetes CRD for topology-aware gang scheduling of multi-component disaggregated deployments. |
 | KAI Scheduler | Kubernetes scheduler performing gang scheduling and fair-share queuing beneath Grove. |
 
@@ -637,9 +721,9 @@ It tokenizes the request into fixed-size blocks and checks each candidate worker
 **Short:** NIXL moves KV-cache blocks GPU-VRAM-to-GPU-VRAM directly, non-blockingly, without a host round-trip.
 A normal RPC framework serializes data through host memory and a request/response cycle, which is far too slow and blocking for moving gigabytes of live KV cache between GPUs on every prefill-to-decode handoff. NIXL instead exposes each worker's registered KV-cache memory as addressable blocks and issues direct RDMA read/write operations against them, so the transfer is zero-copy, GPU-to-GPU, and non-blocking — the source GPU keeps serving other requests while the transfer happens. It supports RDMA/InfiniBand, RoCE via UCX, a TCP fallback, NVMe-oF, and an S3-compatible backend, so the same API works whether the destination is another GPU on the rack or a cold storage tier.
 
-**Q: What does a Dynamo deployment's KV-cache memory hierarchy contain, top to bottom, now that KVBM is deprecated?**
-**Short:** GPU HBM, then host DRAM, then NVMe or object storage; since Dynamo v1.5.0 the engine's native KV offloading runs the lower tiers, not KVBM.
-Dynamo v1.5.0 deprecated the KV Block Manager (removal targeted for v1.7.0) and points host and disk tiering at the engine's native KV offloading. The tiers are unchanged. GPU HBM holds the hottest, actively-used KV cache; blocks that go cold are evicted down to host DRAM, and the coldest blocks can spill further to NVMe or S3-compatible object storage via NIXL's corresponding backends. A block is promoted back to HBM on demand when a request needs it again, which is what lets a conversation that paused for minutes still get a cache hit instead of a full recompute: the block only had to survive somewhere reachable, not stay resident in the fastest tier the whole time. Size the DRAM tier for your realistic idle-return traffic pattern, not just the always-hot working set.
+**Q: What does a Dynamo deployment's KV-cache memory hierarchy contain, top to bottom, now that KVBM is gone?**
+**Short:** GPU HBM, then host DRAM, then NVMe or object storage; the engine's native KV offloading runs the lower tiers, since Dynamo v1.7.0 no longer ships KVBM.
+Dynamo v1.5.0 deprecated the KV Block Manager and v1.7.0 stopped building and shipping it, so host and disk tiering belong to the engine's native KV offloading. The tiers are unchanged. GPU HBM holds the hottest, actively-used KV cache; blocks that go cold are evicted down to host DRAM, and the coldest blocks can spill further to NVMe or S3-compatible object storage via NIXL's corresponding backends. A block is promoted back to HBM on demand when a request needs it again, which is what lets a conversation that paused for minutes still get a cache hit instead of a full recompute: the block only had to survive somewhere reachable, not stay resident in the fastest tier the whole time. Size the DRAM tier for your realistic idle-return traffic pattern, not just the always-hot working set.
 
 **Q: What does the SLO Planner actually scale, and on what signal?**
 **Short:** It scales prefill and decode replica counts independently, targeting TTFT and inter-token-latency SLAs directly.

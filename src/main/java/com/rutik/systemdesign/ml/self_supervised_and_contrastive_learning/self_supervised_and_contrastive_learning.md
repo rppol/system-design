@@ -924,6 +924,21 @@ A team evaluated SSL quality by fine-tuning the full model and comparing to supe
 **Pitfall 6 - Training longer and losing the dense features:**
 A team extended a DINO-style ViT pretraining run to triple the schedule because ImageNet linear-probe accuracy was still rising. Segmentation with a frozen backbone got worse over the same stretch, and patch-similarity maps turned noisy, with background patches matching the object. The DINOv3 paper documents this exact pattern at scale: global metrics keep improving while patch-level feature quality degrades over long schedules. Fix: track a dense metric (linear-probe mIoU, or patch correspondence) next to the global one throughout training, and add Gram anchoring against an early checkpoint (DINOv3 found 100k to 200k iteration teachers work and a 1M-iteration teacher hurts).
 
+**Pitfall 2 as code: downstream features taken after the projection head.**
+
+```python
+# BROKEN: the 128-d projector output, trained to be invariant to the augmentations
+feats = model.projector(model.backbone(x))
+```
+
+```python
+# FIX: use the backbone output, before the projector
+feats = model.backbone(x)                        # e.g. 2048-d for ResNet-50
+probe = torch.nn.Linear(feats.shape[1], num_classes)
+```
+
+The projector exists so that the contrastive loss can discard information, such as colour and orientation, that the augmentations vary. Features after it are therefore worse for downstream tasks; SimCLR reported that the representation before the projection head was more than 10% better on linear evaluation. Both versions train and produce a working probe, so only a comparison of the two shows the loss.
+
 ---
 
 ## 11. Technologies & Tools

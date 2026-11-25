@@ -570,6 +570,24 @@ FLOPs correlate poorly with real device latency — memory-bound depthwise convs
 **Pitfall 7 — Unbounded per-trial budget in a search.**
 Running an AutoML search without `per_run_time_limit` lets one pathological pipeline (a giant SVM on 500k rows) consume the entire budget. Always cap per-trial wall-clock and use a multi-fidelity scheduler (ASHA/Hyperband) so weak configs die early.
 
+**Pitfall 1 as code: the best trial's validation score reported as the result.**
+
+```python
+# BROKEN: the maximum of 200 noisy validation scores is reported as accuracy
+study.optimize(objective, n_trials=200)          # objective scores each config on X_val
+print("accuracy:", study.best_value)
+```
+
+```python
+# FIX: refit the chosen config on train + validation, score once on an untouched test set
+import numpy as np
+
+best = make_model(**study.best_params).fit(np.vstack([X_tr, X_val]), np.concatenate([y_tr, y_val]))
+print("accuracy:", best.score(X_test, y_test))
+```
+
+Each validation score is an estimate with noise, and the search picks the configuration whose noise happened to be most favourable. The more trials, the more optimistic `best_value` becomes, even if every trial is genuinely the same model. Report the number from data the search never saw, and expect it to be lower.
+
 ---
 
 ## 11. Technologies & Tools
@@ -752,3 +770,35 @@ Hardware-aware NAS       92.6%        27 ms         3.8 MB   ~1200 GPU-hours (on
 The NAS model met the 30 ms and 5 MB budgets while giving up only 0.5% accuracy vs the too-slow EfficientNet, and beat the hand-tuned MobileNet by 2.2% at the same latency. Because the supernet was trained once, extracting a second sub-net for a *faster* low-end phone (≤ 18 ms) later cost near-zero — the amortization that justified the up-front GPU-hours.
 
 **What made it work — and the trap avoided:** the team reported accuracy on a **held-out test set the search never saw**, not the search-selection split. An earlier internal run had reported the search-val accuracy (94.0%) and it dropped to 92.6% on real held-out data — a textbook case of NAS overfitting the validation set. The lesson matches §10 Pitfall 1: the split you select architectures on and the split you report must be different, or the headline number is search overfitting.
+
+**BROKEN → FIX: reporting the accuracy of the split that chose the winner.** The 94.0% versus 92.6% story above, as code.
+
+```python
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Candidate:
+    arch: str
+    search_val_acc: float   # accuracy on the split the search ranked candidates by
+
+
+# BROKEN: the max over many noisy estimates, reported as if it were one estimate
+def report_broken(cands: Sequence[Candidate]) -> tuple[str, float]:
+    best = max(cands, key=lambda c: c.search_val_acc)
+    return best.arch, best.search_val_acc       # 94.0%: selection bias, not model quality
+```
+
+```python
+# FIX: shortlist on search-val, choose on a standalone retrain, read the test split exactly once
+def report_fixed(cands: Sequence[Candidate],
+                 retrain_val_acc: Callable[[str], float],
+                 test_acc: Callable[[str], float],
+                 top_k: int = 10) -> tuple[str, float]:
+    shortlist = sorted(cands, key=lambda c: c.search_val_acc, reverse=True)[:top_k]
+    winner = max(shortlist, key=lambda c: retrain_val_acc(c.arch))   # fixes supernet rank disorder
+    return winner.arch, test_acc(winner.arch)                          # 92.6%: the honest number
+```
+
+Taking the maximum of thousands of validation scores selects for candidates whose score was lucky as well as good, so the winner's search-val accuracy is biased upward by an amount that grows with the number of candidates. The test split must never feed a decision, including the top-10 retrain choice, or it turns into a second validation set with the same bias.

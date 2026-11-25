@@ -1,6 +1,6 @@
 # NVIDIA Triton Inference Server
 
-> Version anchor: this module tracks Triton by **NGC container release** (e.g. `nvcr.io/nvidia/tritonserver:26.09-py3`, server release 2.73.0, 2026-09-30, the first tag with initial NVIDIA Rubin GPU support). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
+> Version anchor (checked 2026-11-25): this module tracks Triton by **NGC container release**. Current tag: `nvcr.io/nvidia/tritonserver:26.11-py3`, server release 2.75.0, 2026-11-17 (26.10 is server 2.74.0; 26.09, server 2.73.0, was the first tag with initial NVIDIA Rubin GPU support). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
 
 ---
 
@@ -16,6 +16,8 @@ Triton is best understood as **the standardization layer for GPU inference**. Be
 - **OpenAI Triton** — a *Python kernel DSL* for writing GPU kernels (a compiler front-end that competes with hand-written CUDA), covered in [../../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md](../../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md).
 
 They share only a name. This module is exclusively about the inference server. When someone says "we deploy on Triton" they mean this; when they say "I wrote a Triton kernel" they mean OpenAI's DSL.
+
+**Also sold as NVIDIA Dynamo-Triton.** NVIDIA's developer page (`developer.nvidia.com/dynamo-triton`) names this same server "NVIDIA Dynamo-Triton, formerly NVIDIA Triton Inference Server": the Dynamo platform name applied to the Triton product. It is a naming umbrella, not a new server; the GitHub project, the `tritonserver` NGC containers and everything on this page are unchanged. How Triton relates to the Dynamo distributed-inference framework, `trtllm-serve` and NIM is in [Dynamo and the NVIDIA serving stack](dynamo_and_the_nvidia_serving_stack.md).
 
 **Relationship to NIM and TensorRT-LLM.** Triton sits in the middle of NVIDIA's inference stack:
 
@@ -517,7 +519,7 @@ The response cache (introduced in 6.7) is pluggable. Two implementations ship:
 - **Local cache** — an in-process LRU sized with `--cache-config local,size=1073741824` (1 GB). Fastest (memory lookup) but per-instance and lost on restart.
 - **Redis cache** — `--cache-config redis,host=...,port=6379` shares a cache across every Triton replica in a fleet, so a hit computed on pod A serves pod B. Adds a network hop (~0.2-1 ms) but multiplies effective hit rate across replicas.
 
-The cache key is a hash of the model name, version, and input tensor bytes. **Only deterministic models are cacheable** — mark them `response_cache { enable: true }`. Hit rate is observable via `nv_cache_num_hits_per_model` / `nv_cache_num_misses_per_model`; a low hit rate on high-cardinality inputs means the cache is pure overhead and should be disabled. Sampled LLMs, stateful models, and anything time-dependent must never be cached.
+The cache key is a hash of the model name, version, and input tensor bytes. **Only deterministic models are cacheable** — mark them `response_cache { enable: true }`. Hit rate is observable via `nv_cache_num_hits_per_model` / `nv_cache_num_misses_per_model`; a low hit rate on high-cardinality inputs means the cache is pure overhead and should be disabled. Sampled LLMs, stateful models, and anything time-dependent must never be cached. If a cached model also sets `preserve_ordering: true` in its dynamic batcher, run 26.11 (server 2.75.0) or later: that release fixed a `preserve_ordering` completion-slot issue on response-cache hits, and a use-after-free in the dynamic batcher.
 
 ### 6.17 Tracing — Triton Trace API and OpenTelemetry
 
@@ -543,7 +545,7 @@ The `tensorrtllm` backend is how Triton serves large LLMs at high throughput, an
 - **Multi-GPU via MPI** — tensor/pipeline parallelism across GPUs is orchestrated by an **MPI** launcher (`mpirun` with one rank per GPU). This is why a multi-GPU TensorRT-LLM deployment has a different launch story than a normal Triton model.
 - **Multi-node reality** — Triton is fundamentally a **single-node** server; a model must fit within one node's GPUs. Multi-node LLM serving (a 405B across two nodes) is done with the TensorRT-LLM MPI orchestrator spanning nodes, or by sharding at a higher layer (a router in front of node-local Tritons) — Triton itself does not shard one model across nodes natively.
 
-**Packaging `[26.08+]`.** The 26.08 (server 2.72.0) and 26.09 (server 2.73.0) release notes list the Triton TensorRT-LLM backend container image as not included in the release. On those tags, Triton serves TensorRT-LLM only from a backend you build yourself from the `tensorrtllm_backend` repository or from an older tag's image. NVIDIA's other serving paths for TensorRT-LLM engines are `trtllm-serve` (TensorRT-LLM's own OpenAI-compatible server) and Dynamo; see [Dynamo and the NVIDIA serving stack](dynamo_and_the_nvidia_serving_stack.md).
+**Packaging `[26.08+]`.** The release notes for 26.08 (server 2.72.0) through 26.11 (server 2.75.0) list the Triton TensorRT-LLM backend container image as not included in the release. On those tags, Triton serves TensorRT-LLM only from a backend you build yourself from the `tensorrtllm_backend` repository or from an older tag's image. NVIDIA's other serving paths for TensorRT-LLM engines are `trtllm-serve` (TensorRT-LLM's own OpenAI-compatible server) and Dynamo; see [Dynamo and the NVIDIA serving stack](dynamo_and_the_nvidia_serving_stack.md).
 
 ### 6.19 Model Repository Agents and Cloud Repositories
 
@@ -577,12 +579,12 @@ Write a C++ backend over the Python backend when: you need every microsecond (no
 
 ### 6.21 Building Minimal Images with compose.py
 
-The stock NGC image (`tritonserver:26.09-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
+The stock NGC image (`tritonserver:26.11-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
 
 ```bash
 python3 compose.py --backend tensorrt --backend python \
-  --repoagent checksum --container-version 26.09 \
-  --output-name triton-slim:26.09
+  --repoagent checksum --container-version 26.11 \
+  --output-name triton-slim:26.11
 ```
 
 This drops the image to a few GB, shrinks the attack surface, and speeds pulls in autoscaling. Backend selection happens at **build** time (which `.so` backends are baked in), independent of which models the repository actually loads at **run** time — a model referencing a backend not in the image simply fails to load.
@@ -779,7 +781,7 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 
 **String/BYTES tensors are a recurring gotcha.** Triton has no native string type; text is `TYPE_STRING`/`BYTES`, carried as length-prefixed UTF-8 byte arrays. In NumPy that is `dtype=object` (or `np.bytes_`), and a mismatch (sending `str` where the backend expects encoded `bytes`, or forgetting the object dtype) produces cryptic serialization errors. Classification models can also attach human-readable labels: set `label_filename` in the output config and request `class_count` to get back ranked `label:score` strings instead of raw logits — Triton does the top-k for you.
 
-**Cancellation matters as much as generation.** A gRPC streaming client that disconnects (a closed connection, a client-side timeout, a user closing a tab) sends a **stream cancellation** the transport layer surfaces to the backend — but only backends that actually poll for it stop early. TRT-LLM and vLLM backends check cancellation state between decode steps and abort the in-flight generation; a custom backend must poll the equivalent of `TRITONBACKEND_ResponseFactoryIsCancelled` itself, or an abandoned request keeps consuming a GPU slot and burning compute generating tokens nobody will read. **HTTP has no mid-request cancellation primitive** — an HTTP client that gives up cannot signal Triton to stop, so any workload where users bail mid-generation (chat UIs, autocomplete) should default to gRPC for exactly this reason, independent of the framing-overhead argument in §6.9.
+**Cancellation matters as much as generation.** A gRPC streaming client that disconnects (a closed connection, a client-side timeout, a user closing a tab) sends a **stream cancellation** the transport layer surfaces to the backend — but only backends that actually poll for it stop early. TRT-LLM and vLLM backends check cancellation state between decode steps and abort the in-flight generation; a custom backend must poll the equivalent of `TRITONBACKEND_ResponseFactoryIsCancelled` itself, or an abandoned request keeps consuming a GPU slot and burning compute generating tokens nobody will read. **HTTP has no mid-request cancellation primitive** — an HTTP client that gives up cannot signal Triton to stop, so any workload where users bail mid-generation (chat UIs, autocomplete) should default to gRPC for exactly this reason, independent of the framing-overhead argument in §6.9. Two recent server releases tighten this path: 26.10 (2.74.0) checks cancellation before a request is dispatched to the backend and before batch assembly in the TensorRT backend, so a request cancelled while it waits in the queue never reaches the GPU; 26.11 (2.75.0) prevents gRPC streams from being cancelled silently under backpressure.
 
 ---
 
@@ -855,7 +857,7 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 **Do NOT reach for Triton when:**
 
 - You are a **pure-LLM shop** serving a handful of large models — run **vLLM or SGLang directly** for a simpler stack ([../../llm/inference_engines/inference_engines.md](../../llm/inference_engines/inference_engines.md); deep dive [../../llm/vllm_deep_dive/vllm_deep_dive.md](../../llm/vllm_deep_dive/vllm_deep_dive.md)). Triton adds value once you also have non-LLM models to consolidate.
-- You serve **TensorRT-LLM engines and want a prebuilt image**. The 26.08 and 26.09 releases ship no Triton TensorRT-LLM backend container, so on those tags run `trtllm-serve` or Dynamo instead, or build the backend yourself from `tensorrtllm_backend` (§6.18).
+- You serve **TensorRT-LLM engines and want a prebuilt image**. The 26.08 through 26.11 releases ship no Triton TensorRT-LLM backend container, so on those tags run `trtllm-serve` or Dynamo instead, or build the backend yourself from `tensorrtllm_backend` (§6.18).
 - You serve **small CPU-only models** — a **FastAPI + ONNX Runtime** service is lighter and cheaper; see the reader-linked case study [../../fastapi/case_studies/design_ml_inference_api_fastapi.md](../../fastapi/case_studies/design_ml_inference_api_fastapi.md).
 - You are choosing **TorchServe** — its repository was **archived on 7 August 2025** and is read-only, with no further bug fixes or security patches; Triton's PyTorch backend or Ray Serve is where PyTorch serving lives now.
 - Your workload is a **Python-heavy multi-step pipeline** where the model is a small part — **Ray Serve** composes Python business logic more naturally than Triton's ensemble/BLS.
@@ -877,6 +879,30 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 - **TensorRT-LLM tokenizer drift.** The generation engine is token-in/token-out, so the preprocessing/postprocessing Python models must use the *exact* tokenizer the engine was built with; a mismatched tokenizer produces garbled output that looks like a model bug. Fix: pin the tokenizer artifact alongside the engine and version them together.
 - **Tracing every request.** Leaving `--trace-config rate=1` (trace all) or `level=TENSORS` in production adds serialization overhead per request and can dump gigabytes of tensor data. Fix: sample (`rate=100` or higher) and keep `level=TIMESTAMPS` in prod, reserving TENSORS for debugging.
 - **Abandoned streams burn GPU for nothing.** A chat UI's user closes the tab mid-generation; if the backend never polls for stream cancellation, Triton keeps decoding tokens for a connection that is already gone, wasting a GPU slot other requests are queued behind. Fix: confirm the backend honors cancellation (TRT-LLM and vLLM do; verify custom backends explicitly poll the `TRITONBACKEND_ResponseFactoryIsCancelled`-equivalent state), and prefer gRPC streaming over HTTP since HTTP has no mid-request cancel signal at all.
+
+**BROKEN → FIX: a dynamic batcher that never waits.** The most common Triton config bug is a `dynamic_batching {}` block that is present but does almost nothing. `max_queue_delay_microseconds` defaults to **0** (`model_config.proto`), so when an instance frees up the batcher sends only the requests already queued; at moderate, bursty load the queue is usually empty or holds one request, and most executions run at batch size 1. Omitting `instance_group` gives the documented default of one execution instance per visible GPU, so consecutive batches serialize on that one instance.
+
+```protobuf
+# BROKEN: batching is enabled in name only
+name: "resnet50_trt"
+platform: "tensorrt_plan"
+max_batch_size: 32
+dynamic_batching { }   # max_queue_delay_microseconds = 0: dispatch whatever is queued, now
+# no instance_group:  1 instance per GPU, so batch N+1 waits for batch N to finish
+```
+
+```protobuf
+# FIX: let requests wait a bounded time to coalesce, and run two batches per GPU at once
+name: "resnet50_trt"
+platform: "tensorrt_plan"
+max_batch_size: 32
+dynamic_batching {
+  max_queue_delay_microseconds: 2000   # each request waits at most 2 ms; set it from the p99 budget
+}
+instance_group [ { count: 2, kind: KIND_GPU } ]   # 2 x (weights + activations) must fit in VRAM
+```
+
+The delay is a ceiling, not a fixed wait: if a full `max_batch_size` batch forms during it, the batch is sent at once. Confirm the change with the ratio `nv_inference_request_count / nv_inference_exec_count`, which is the average batch size and should rise from ~1 toward 8-16; then re-run `perf_analyzer` at production concurrency, because a 2 ms delay is pure added latency for a model that never sees two requests at once.
 
 ---
 

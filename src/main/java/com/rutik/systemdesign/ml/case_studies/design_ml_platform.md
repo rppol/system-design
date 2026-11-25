@@ -53,7 +53,7 @@ flowchart TD
     end
     fs["Feature Store\noffline Hive+Spark / online Redis\nfeature registry + lineage"]
     tp["Training Platform\nK8s + Volcano scheduler,\nKubeflow + Argo, MLflow tracking"]
-    si["Serving Infra\nModel Registry (MLflow),\nTorchServe / TF Serving / sklearn,\nA/B router + shadow"]
+    si["Serving Infra\nModel Registry (MLflow),\nKServe + Triton / sklearn runtime,\nA/B router + shadow"]
     cp["Control Plane\njob priority queue, quotas per team,\ncost tracking, health monitoring"]
     infra["Infrastructure\nK8s 100 nodes, 200 A100 + 500 CPU cores,\nS3 artifacts, Redis, Hive metastore"]
 
@@ -182,8 +182,11 @@ the dataset version (S3 path + snapshot date) and the code commit (Git SHA). Ful
 
 Engineers use PyTorch, TensorFlow, scikit-learn, and XGBoost. A single serving interface hides
 framework differences. The model server reads the framework tag from the model registry and
-routes to the appropriate runtime: TorchServe for PyTorch, TF Serving for TensorFlow, a custom
-Flask + joblib server for scikit-learn, and a custom server for XGBoost. All expose the same
+creates one KServe `InferenceService` whose predictor picks the runtime: NVIDIA Triton Inference
+Server for PyTorch (exported to ONNX or TorchScript) and TensorFlow SavedModels, and KServe's
+built-in scikit-learn and XGBoost runtimes for tree and linear models. Triton supplies server-side
+dynamic batching per model; KServe supplies the Kubernetes lifecycle (autoscaling, scale-to-zero
+for idle models, `canaryTrafficPercent` for the canary split in section 6). All expose the same
 gRPC and REST API: {model_name, model_version, inputs} -> {outputs, latency}. Engineers write
 model code once; the platform handles deployment details.
 
@@ -680,8 +683,8 @@ class CostTracker:
 | MLflow | Experiment tracking + model registry | S3 artifact backend, PostgreSQL metadata |
 | Kubernetes + Volcano | Training job scheduling | Gang scheduling, priority queues, spot instances |
 | Kubeflow Pipelines | ML workflow orchestration | DAG-based pipeline definition |
-| TorchServe | PyTorch model serving | Dynamic batching, gRPC + REST |
-| TF Serving | TensorFlow model serving | Batching config, version management |
+| KServe | Model-serving control plane on Kubernetes | One `InferenceService` per model version, `canaryTrafficPercent`, autoscaling |
+| Triton Inference Server | Runtime for PyTorch (ONNX/TorchScript) and TensorFlow models | `dynamic_batching`, multiple model instances per GPU, gRPC + REST |
 | Prometheus + Grafana | Platform observability | GPU utilization, feature store latency, serving QPS |
 | Argo Workflows | Feature pipeline orchestration | Retry logic, parallelism |
 
@@ -695,7 +698,7 @@ class CostTracker:
 | Offline store | Hive + Parquet | Delta Lake / Iceberg | Delta Lake: better ACID transactions and time travel; Hive: more mature tooling in the existing stack, lower migration cost |
 | Experiment tracking | MLflow | Weights & Biases (W&B) | MLflow: self-hosted (data privacy), open source, no per-seat cost; W&B: better UI, more features |
 | Training orchestration | Kubeflow + Volcano | Ray Train | Ray Train: simpler Python API; Kubeflow: more flexible for heterogeneous workloads, better K8s integration |
-| Model serving | Multi-framework (TorchServe + TF Serving) | Triton Inference Server | Triton: single serving solution for all frameworks; chosen approach: easier model packaging per framework |
+| Model serving | KServe control plane + Triton runtime (sklearn/XGBoost on KServe's own runtimes) | Ray Serve, BentoML, one hand-written server per framework | KServe + Triton: one deployment API for every framework and server-side batching on GPU; Ray Serve suits Python-heavy multi-model graphs; BentoML packages fastest but leaves rollout to you; per-framework servers multiply the ops surface |
 | A/B routing | Consistent hash (MD5 mod 100) | Sticky session via cookie | Hash: stateless, no session storage; cookie: simpler but requires client support |
 | Feature pipeline | Batch materialization | Real-time Flink streaming | Batch: simpler, cheaper, works for < 1 hour freshness; streaming needed only for real-time features (e.g., recent clicks) |
 

@@ -34,6 +34,29 @@ Key insight: the chain rule makes it possible to attribute the network's error t
 
 **Universal Approximation Theorem**: an MLP with a single hidden layer of sufficient width and a nonlinear activation can approximate any continuous function on a compact set to arbitrary precision. Depth replaces exponential width.
 
+**Worked example: one hidden layer solves XOR.** XOR is 1 for `(0,1)` and `(1,0)` and 0 for `(0,0)` and `(1,1)`; no single line separates those, so a perceptron fails. Two ReLU units are enough: `h1 = ReLU(x1 + x2)`, `h2 = ReLU(x1 + x2 - 1)`, output `y = h1 - 2 h2`.
+
+| x1, x2 | h1 | h2 | y = h1 - 2 h2 |
+|---|---|---|---|
+| 0, 0 | 0 | 0 | 0 |
+| 0, 1 | 1 | 0 | 1 |
+| 1, 0 | 1 | 0 | 1 |
+| 1, 1 | 2 | 1 | 0 |
+
+```python
+import numpy as np
+
+X = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=float)
+W1 = np.array([[1.0, 1.0], [1.0, 1.0]])      # column k = weights of hidden unit k
+b1 = np.array([0.0, -1.0])
+w2 = np.array([1.0, -2.0])
+print(np.maximum(0.0, X @ W1 + b1) @ w2)     # [0. 1. 1. 0.]
+```
+
+The hidden layer bends the input space so that the output layer's single line can separate it, which is the whole argument for nonlinear hidden units.
+
+**Worked example: one backprop step by hand.** One sigmoid neuron, `x = 2`, `w = 0.5`, `b = 0`, label `y = 1`, binary cross-entropy. Forward: `z = 1.0`, `a = sigmoid(1.0) = 0.7311`, `L = -ln(0.7311) = 0.3133`. Backward: for sigmoid with BCE, `dL/dz = a - y = -0.2689`, so `dL/dw = (a - y) x = -0.5379`. With learning rate 0.1, `w = 0.5 + 0.1 x 0.5379 = 0.5538`, and the next forward pass gives `z = 1.1076`, `a = 0.7517`, `L = 0.2855`. The loss fell by 0.028 in one step, and the chain rule needed only two local derivatives, which is all backpropagation does at every node of a large graph.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -504,7 +527,7 @@ Common bug: calling `optimizer.zero_grad()` AFTER `loss.backward()` discards com
 
 **Image classification (MNIST)**: MLP with 784 -> 512 -> 256 -> 10 with BatchNorm + GELU + Dropout(0.3) achieves ~98% accuracy. Baseline linear model achieves ~92%.
 
-**Tabular data (fraud detection)**: MLPs with 4-8 layers often match or beat tree ensembles when features are well-engineered. Dropout p=0.3 and weight decay 1e-4 are typical regularization settings.
+**Tabular data (fraud detection)**: on typical medium-sized tabular datasets, gradient-boosted trees still beat MLPs more often than not (Grinsztajn et al., 2022, arXiv 2207.08815, "Why do tree-based models still outperform deep learning on tabular data?"), so an MLP earns its place here as a second model for stacking or when it must share embeddings with other networks. When used, dropout p=0.3 and weight decay 1e-4 are typical regularization settings.
 
 **Feature extraction backbone**: the final hidden layer of a trained MLP produces dense embeddings used for similarity search (cosine distance, FAISS retrieval).
 

@@ -461,6 +461,25 @@ def _choose_monitoring(req: MLSystemRequirements) -> str:
 
 **Ignoring cold start**: a collaborative filtering model cannot recommend items with fewer than 10 interactions or users with fewer than 3 interactions. These are served random popular items, which produces a terrible experience for 30% of users. Fix: have an explicit cold-start strategy — content-based features for new items, demographic-based for new users.
 
+**Label leakage as code: a feature that is only known after the decision.**
+
+```python
+# BROKEN: chargeback_flag is written weeks after the authorization it is used to predict
+X = txns[["amount", "merchant_risk", "chargeback_flag"]]
+```
+
+```python
+# FIX: every feature declares when it becomes known; drop any known after the decision
+import logging
+
+AVAILABLE_AT = {"amount": "auth_ts", "merchant_risk": "auth_ts", "chargeback_flag": "chargeback_ts"}
+leaky = [f for f, ts in AVAILABLE_AT.items() if (txns[ts] > txns["auth_ts"]).any()]
+X = txns[[f for f in AVAILABLE_AT if f not in leaky]]
+logging.warning("dropped post-decision features: %s", leaky)
+```
+
+The broken model scores a near-perfect offline AUC because the feature almost is the label. In production the value is always empty at decision time, so the model degrades badly. Declaring an availability timestamp for every feature turns "was this known then?" into a check the pipeline runs, rather than a question a reviewer has to remember to ask.
+
 ---
 
 ## 11. Technologies & Tools

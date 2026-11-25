@@ -42,6 +42,18 @@ Key insight: there is no "UNK" in a well-built byte-level tokenizer. By falling 
 4. **Normalization happens before segmentation.** Unicode NFKC, optional lowercasing, and whitespace handling change the byte stream the algorithm sees, so they must also be frozen with the tokenizer.
 5. **Pieces are not morphemes.** Subword boundaries are statistical, not linguistic. "tokenization" might split as "token"+"ization" or "tok"+"eni"+"zation" depending on corpus frequencies — do not over-interpret them.
 
+**Worked example: four BPE merges on a toy corpus.** Corpus word counts: `low` x5, `lower` x2, `newest` x6, `widest` x3, split into characters (79 symbols in total: 15 + 10 + 36 + 18). Count every adjacent pair, weighted by word frequency, and merge the most frequent:
+
+| Step | Pair counts (top) | Merge | `newest` becomes | Corpus symbols |
+|---|---|---|---|---|
+| 0 | `e s` 9, `s t` 9, `w e` 8, `l o` 7 | — | `n e w e s t` | 79 |
+| 1 | tie at 9, broken by a fixed rule | `e s` -> `es` | `n e w es t` | 70 |
+| 2 | `es t` 9 | `es t` -> `est` | `n e w est` | 61 |
+| 3 | `l o` 7, `o w` 7 | `l o` -> `lo` | `n e w est` | 54 |
+| 4 | `lo w` 7 | `lo w` -> `low` | `n e w est` | 47 |
+
+Four merges cut the corpus from 79 to 47 symbols (-41%), and the learned units (`est`, `low`) are the frequent ones, which is principle 2 in action. Two details matter in real tokenizers: ties must be broken by a deterministic rule or two trainings of the same corpus produce different vocabularies, and real BPE marks word boundaries (an end-of-word symbol, or a byte-level space marker such as GPT-2's `Ġ`), so `est` at the end of a word and `est` inside `estimate` can become different tokens.
+
 ---
 
 ## 4. Types / Architectures / Strategies

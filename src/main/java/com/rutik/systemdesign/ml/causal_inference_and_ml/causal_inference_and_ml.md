@@ -809,6 +809,28 @@ A team trained a CATE model to predict who would respond to a discount. They inc
 **Pitfall 6: TWFE on a staggered rollout.**
 A marketplace launched a pricing feature city by city over 9 months and estimated its effect with `Y ~ treated + C(city) + C(week)`. The coefficient was +0.4% GMV with a confidence interval spanning zero, and the feature was nearly rolled back. A Callaway-Sant'Anna event study on the same panel showed effects rising from +1% in the first month to +4% by month six. The early cities, already treated and still growing, had acted as controls for the late cities and absorbed most of the effect. Fix: run a Goodman-Bacon decomposition to see how much weight sits on already-treated controls, then use a heterogeneity-robust estimator with never-treated or not-yet-treated controls.
 
+**Pitfall 5 as code: a post-treatment feature in the outcome model.**
+
+```python
+# BROKEN: a covariate measured AFTER treatment enters the S-learner
+import pandas as pd
+from sklearn.ensemble import GradientBoostingRegressor
+
+X = df[["age", "tenure_days", "sessions_after_coupon"]]      # the coupon changes this one
+s_learner = GradientBoostingRegressor().fit(X.assign(t=df["treated"]), df["spend"])
+cate = s_learner.predict(X.assign(t=1)) - s_learner.predict(X.assign(t=0))
+```
+
+```python
+# FIX: freeze the covariate set at assignment time; nothing the treatment can move
+PRE_TREATMENT = ["age", "tenure_days", "sessions_30d_before_assignment"]
+X = df[PRE_TREATMENT]
+s_learner = GradientBoostingRegressor().fit(X.assign(t=df["treated"]), df["spend"])
+cate = s_learner.predict(X.assign(t=1)) - s_learner.predict(X.assign(t=0))
+```
+
+The broken model fits better, which is why nobody questions it. `sessions_after_coupon` is partly caused by the coupon, so it carries part of the treatment effect, and the model credits that part to the session feature instead of to `t`. The estimated effect shrinks toward zero with no error and no warning. Tag every feature with the time it becomes known and drop any that are known only after assignment.
+
 ---
 
 ## 11. Technologies & Tools

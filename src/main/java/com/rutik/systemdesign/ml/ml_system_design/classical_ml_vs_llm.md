@@ -1,4 +1,6 @@
 # Classical ML vs LLM — The Build-Decision Framework
+> Prices, company figures and sources on this page were checked against the providers' pricing pages and the cited primary sources on 2026-11-25.
+>
 > Deep-dive sub-file of [ml_system_design](ml_system_design.md). Cross-reads:
 > [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md),
 > [../../llm/context_engineering](../../llm/context_engineering/context_engineering.md) (RAG-vs-fine-tuning),
@@ -78,10 +80,10 @@ The distillation row is the bridge: use the LLM as a *teacher* to label data or 
 quadrantChart
     title Paradigm fit by task structure and volume
     x-axis "Low volume / diverse tasks" --> "High volume / narrow task"
-    y-axis "Unstructured language" --> "Structured tabular"
+    y-axis "Structured tabular" --> "Unstructured language"
     quadrant-1 "Distill LLM to small model"
     quadrant-2 "Prompt or fine-tune LLM"
-    quadrant-3 "Fine-tune small encoder"
+    quadrant-3 "Logistic or small GBDT"
     quadrant-4 "GBDT or logistic or two-tower"
     "Chatbot / assistant": [0.20, 0.80]
     "Doc extraction (long tail)": [0.30, 0.72]
@@ -91,7 +93,7 @@ quadrantChart
     "Semantic search": [0.55, 0.55]
 ```
 
-Two axes decide the quadrant: how structured the input is (vertical) and how high-volume/narrow the task is (horizontal). Unstructured + low-volume → prompt an LLM; structured + high-volume → classical ML; high-volume + unstructured → distill the LLM into a small model to get LLM quality at classical economics.
+Two axes decide the quadrant: how unstructured the input is (vertical, unstructured at the top) and how high-volume/narrow the task is (horizontal). Unstructured + low-volume → prompt an LLM; structured + high-volume → classical ML; high-volume + unstructured → distill the LLM into a small model to get LLM quality at classical economics.
 
 ```mermaid
 flowchart TD
@@ -178,7 +180,7 @@ def paradigm_cost_comparison(daily_predictions: int,
                              llm_latency_ms: float = 800.0,
                              gbdt_cost_per_call_usd: float = 0.0000002,
                              gbdt_latency_ms: float = 0.5,
-                             classical_build_usd: float = 40_000.0):
+                             classical_build_usd: float = 40_000.0) -> dict[str, float | int | str]:
     """
     Compare a prompted LLM (no build cost, high marginal cost) against a trained
     classical model (high build cost, negligible marginal cost) over one year.
@@ -258,13 +260,13 @@ The mechanics also include a *capability* gate that cost cannot override: if you
 
 **Microsoft — a prompted LLM beat a fine-tuned specialist model outright.** Microsoft Research's Medprompt showed that GPT-4 steered with dynamic few-shot selection, self-generated chain-of-thought, and choice-shuffle ensembling — no weight updates at all — beat Med-PaLM 2, Google's model fine-tuned specifically on medical text, on all nine MultiMedQA benchmarks, cutting the MedQA (USMLE) error rate by 27% and crossing 90% accuracy for the first time. This is the direction the golden-hammer pitfall (Section 10) says should be rare: here the generalist model, not the specialist fine-tune, was the better production choice, purely from prompt engineering. Source: [arXiv:2311.16452](https://arxiv.org/abs/2311.16452), "Can Generalist Foundation Models Outcompete Special-Purpose Tuning? Case Study in Medicine" (Microsoft Research, Nov 2023).
 
-**Klarna — a full LLM-first replacement, then a partial reversal toward the hybrid this module argues for.** Klarna's OpenAI-built assistant, launched February 2024, handled 2.3 million conversations in its first month — work the company described as equivalent to about 700 full-time agents — with a two-minute median resolution time versus eleven minutes for a human agent. By May 2025 Klarna's CEO told Bloomberg the company had cut too far into human support and was rehiring for premium support roles, and by 2026 it had settled into a freelance, per-shift human-support layer working alongside the AI assistant rather than replacing it outright. Read together, this is a real-world instance of Principle 5: the team that skips the hybrid and goes all-in on one paradigm often ends up building the hybrid anyway, at a higher cost than designing it in from the start. Sources: [OpenAI, "Klarna's AI assistant does the work of 700 full-time agents"](https://openai.com/index/klarna/); [Klarna press release, Feb 2024](https://www.klarna.com/international/press/klarna-ai-assistant-handles-two-thirds-of-customer-service-chats-in-its-first-month/).
+**Klarna — a full LLM-first replacement, then a partial reversal toward the hybrid this module argues for.** Klarna's OpenAI-built assistant, launched February 2024, handled 2.3 million conversations in its first month — work the company described as equivalent to about 700 full-time agents — with a two-minute median resolution time versus eleven minutes for a human agent. In May 2025 Klarna's CEO told Bloomberg the company would hire human support staff again so that customers can always reach a person, after cost had been weighted too heavily against quality. Read together, this is a real-world instance of Principle 5: the team that skips the hybrid and goes all-in on one paradigm often ends up building the hybrid anyway, at a higher cost than designing it in from the start. Sources: [OpenAI, "Klarna's AI assistant does the work of 700 full-time agents"](https://openai.com/index/klarna/); [Klarna press release, Feb 2024](https://www.klarna.com/international/press/klarna-ai-assistant-handles-two-thirds-of-customer-service-chats-in-its-first-month/).
 
 **Google — an LLM distilled down to a small model for on-device latency and cost.** Gemini Nano (1.8B and 3.25B parameter variants) is distilled from Google's larger Gemini models and shipped 4-bit quantized specifically so it can run on-device — summarization and reading-comprehension quality inherited from the teacher, at a size and latency a phone can serve locally with no per-call API cost at all. This is the distillation row of Section 4's table at production scale: keep the teacher's quality, pay a small model's marginal cost. Source: [arXiv:2312.11805](https://arxiv.org/abs/2312.11805), "Gemini: A Family of Highly Capable Multimodal Models" (Google, Dec 2023).
 
-**Sourcegraph — a small, latency-tuned model kept on the serving path instead of the flagship LLM.** Cody's code-completion feature is latency-critical (autocomplete has to return before the developer finishes typing), so Sourcegraph runs a small, specifically-tuned completion model there rather than routing every keystroke through a large general-purpose LLM; the chat feature, which is not latency-critical, uses the larger model. Their 2024 migration of the autocomplete model cut P75 latency from 900ms to 690ms while increasing the accepted-completion rate — a concrete instance of picking the small model for the latency-bound path and reserving the LLM for the path that can afford it. Source: [Sourcegraph, "Improving Cody Autocomplete: Faster and smarter"](https://sourcegraph.com/blog/improving-cody-autocomplete-faster-smarter).
+**Sourcegraph — a dedicated completion model on the latency-critical path, not the chat model.** Cody's autocomplete has to return before the developer finishes typing, so Sourcegraph serves it from a separate completion model rather than routing every keystroke through the larger model behind chat. In August 2024 it switched that completion model from StarCoder to DeepSeek-V2 and added client-side caching ("Hot Streak") and adaptive debouncing ("Smart Throttle"): P75 latency for single-line completions, 87% of all suggestions, fell from 900ms to 690ms, and accepted characters per user rose 58% (600 to 950). Both the model swap and the client work moved latency, which is the lesson: on a keystroke path, the serving design matters as much as the model choice. Source: [Sourcegraph, "Improving Cody Autocomplete: Faster and Smarter" (Aug 2024)](https://sourcegraph.com/blog/improving-cody-autocomplete-faster-smarter).
 
-**Stripe — structured, high-volume prediction stays classical.** Radar scores every transaction inside the payment-authorization path under a roughly 100ms end-to-end budget, of which model inference itself consumes only 1-2ms; Stripe migrated from a Wide-and-Deep architecture (XGBoost plus a DNN) to a pure DNN in mid-2022 for training-pipeline reasons, but the replacement was still a trained, task-specific model, never a prompted LLM. This is the anchor case for why Section 3's Principle 1 exists: an LLM's 100ms-plus round trip alone would consume the entire latency budget before a single feature is even scored. Source: [Stripe, "How we built it: Stripe Radar"](https://stripe.dev/blog/how-we-built-it-stripe-radar).
+**Stripe — structured, high-volume prediction stays classical.** Radar scores more than 1,000 characteristics of every transaction and makes its decision in under 100ms, inside the payment-authorization path; Stripe reports it wrongly blocks 0.1% of legitimate payments. In mid-2022 Stripe migrated from a Wide-and-Deep ensemble (XGBoost plus a DNN) to a pure multi-branch DNN, cutting training time by over 85% to under two hours, but the replacement was still a trained, task-specific model, never a prompted LLM. This is the anchor case for why Section 3's Principle 1 exists: a hosted LLM's 300ms-plus round trip alone would exceed the whole 100ms budget before any feature is scored. Source: [Stripe, "How we built it: Stripe Radar" (2023)](https://stripe.dev/blog/how-we-built-it-stripe-radar).
 
 Two more hybrids worth naming without a dedicated citation each: semantic search everywhere pairs a classical-ML primitive (embeddings) for retrieval with an LLM for reranking or synthesis, and content moderation pairs cheap classical filters for volume with LLM guardrail models for nuanced or adversarial content (see [design_harmful_content_detection](../case_studies/design_harmful_content_detection.md)) — both are the same head/tail split Section 5's router diagram formalizes.
 
@@ -273,7 +275,7 @@ Two more hybrids worth naming without a dedicated citation each: semantic search
 | Microsoft / OpenAI (Medprompt) | Prompted GPT-4 outperformed a fine-tuned medical specialist model | LLM replaces fine-tuned | arXiv:2311.16452 |
 | Klarna | Support workflow went LLM-first, then partially back to a human/AI hybrid | LLM-first, corrected toward hybrid | OpenAI + Klarna press release |
 | Google (Gemini Nano) | Large Gemini models distilled to a 1.8B/3.25B on-device model | LLM distilled to small model | arXiv:2312.11805 |
-| Sourcegraph (Cody) | Latency-critical autocomplete kept on a small tuned model, not the flagship LLM | Small model over LLM on the critical path | Sourcegraph engineering blog |
+| Sourcegraph (Cody) | Latency-critical autocomplete served by a dedicated completion model, separate from chat | Dedicated model on the critical path | Sourcegraph engineering blog |
 | Stripe (Radar) | Structured fraud scoring stayed a trained DNN, never a prompted LLM | Classical stays classical | Stripe engineering blog |
 
 Read across the table, the direction is not "LLMs are winning" or "classical ML is winning" — it is that each organization moved *toward whichever paradigm fit that specific task's volume, latency, and label situation*, sometimes toward the LLM and sometimes away from it, which is the entire argument of this module rather than an exception to it.
@@ -298,37 +300,37 @@ Section 6 illustrated the crossover with round numbers ($0.002/call, $0.0000002/
 
 | Path | Marginal cost/call | Fixed/build cost | Year-1 cost at 2M/mo | Year-2+ cost at 2M/mo | p99 latency (illustrative) |
 |------|--------------------|--------------------|----------------------|------------------------|------|
-| Hosted LLM — cheap tier (GPT-4o mini, $0.15/$0.60 per MTok) | ~$0.000102 | $0 | ~$2,450/yr | ~$2,450/yr | 300–900ms |
+| Hosted LLM — cheap tier (Claude Haiku 5.5, $0.10/$0.50 per MTok) | ~$0.00007 | $0 | ~$1,680/yr | ~$1,680/yr | 300–900ms |
 | Hosted LLM — capable tier (Claude Haiku 4.5, $1/$5 per MTok) | ~$0.0007 | $0 | ~$16,800/yr | ~$16,800/yr | 300–1200ms |
-| Fine-tuned DistilBERT, self-hosted (1x AWS g5.xlarge, $1.006/hr) | ~$0.0004 at this volume | $40,000 (labels + eng) | ~$48,700/yr | ~$8,700/yr | 5–15ms |
-| Small open-weights model, prompted, self-hosted (same GPU, no fine-tune) | ~$0.0004 at this volume | ~$8,000 (prompt eng + eval set, no labeling) | ~$16,700/yr | ~$8,700/yr | 30–150ms |
+| Fine-tuned DistilBERT, self-hosted (1x AWS g5.xlarge, $1.006/hr) | ~$0.0004 at this volume | $40,000 (labels + eng) | ~$48,800/yr | ~$8,800/yr | 5–15ms |
+| Small open-weights model, prompted, self-hosted (same GPU, no fine-tune) | ~$0.0004 at this volume | ~$8,000 (prompt eng + eval set, no labeling) | ~$16,800/yr | ~$8,800/yr | 30–150ms |
 
-Prices read 2026-08-25: OpenAI GPT-4o mini and GPT-4o from [developers.openai.com/api/docs/pricing](https://developers.openai.com/api/docs/pricing); Claude Haiku 4.5 and Claude Sonnet 5 from [platform.claude.com/docs/en/about-claude/pricing](https://platform.claude.com/docs/en/about-claude/pricing); AWS `g5.xlarge` on-demand rate from AWS EC2 pricing, $1.0060/hr in `us-east-1`. Token counts and GPU throughput are engineering estimates for this scenario, not measured — re-derive them for your own prompt length and hardware before trusting the total.
+Prices read 2026-11-25: Claude Haiku 5.5 (input $0.10/MTok for prompts up to 100,000 tokens, output $0.50/MTok) and Claude Haiku 4.5 from [platform.claude.com/docs/en/about-claude/pricing](https://platform.claude.com/docs/en/about-claude/pricing); AWS `g5.xlarge` on-demand rate $1.006/hr in `us-east-1` (`$1.006 x 8,760 h = $8,813/yr`). Per-call cost is `600 x input price + 20 x output price`, so Haiku 5.5 is `600 x $0.10/1M + 20 x $0.50/1M = $0.00007`. Token counts and GPU throughput are engineering estimates for this scenario, not measured — re-derive them for your own prompt length and hardware before trusting the total.
 
-**Read the table for what it actually says, not just for a winner.** At this specific volume, the cheap-tier hosted LLM is cheaper than self-hosting a fine-tuned classifier in *every* year, not just year one — a result that would have been reversed at 2023 token prices, and is exactly the "falling token prices move the break-even" effect Section 6 flags. The fine-tuned model only wins on pure dollar cost above roughly 7M requests/month against the cheap tier, or roughly 1M requests/month against the capable tier — both far above this scenario's 2M/month:
+**Read the table for what it actually says, not just for a winner.** At this specific volume, the cheap-tier hosted LLM is cheaper than self-hosting a fine-tuned classifier in *every* year, not just year one — a result that would have been reversed at 2023 token prices, and is exactly the "falling token prices move the break-even" effect Section 6 flags. The fine-tuned model only wins on pure dollar cost above roughly 10M requests/month against the cheap tier, or roughly 1M requests/month against the capable tier:
 
 ```
-  cheap-tier crossover    :  $8,700 / (365 x $0.000102)   =  233,700 calls/day  ~=   7.0M/month
-  capable-tier crossover  :  $8,700 / (365 x $0.0007)     =   34,050 calls/day  ~=   1.0M/month
-  ratio                   :  7.0M / 1.0M                                        =        7.0x
+  cheap-tier crossover    :  $8,800 / (365 x $0.00007)    =  344,400 calls/day  ~=  10.5M/month
+  capable-tier crossover  :  $8,800 / (365 x $0.0007)     =   34,400 calls/day  ~=   1.05M/month
+  ratio                   :  10.5M / 1.05M                                      =       10x
 ```
 
 | Symbol | What it is |
 |--------|------------|
-| `$8,700` | The fine-tuned model's steady-state annual cost (year 2+, build already amortized — see the cost table above) |
+| `$8,800` | The fine-tuned model's steady-state annual cost (year 2+, build already amortized — see the cost table above) |
 | `365 x price` | Converts a per-call price into an annual per-call rate, so it can be divided into an annual budget |
 | `crossover` | The daily volume at which the LLM path's annual spend equals the classical path's steady-state annual spend |
 
-**Which hosted LLM you would otherwise use changes the crossover by 7x**, which is why "compare to an LLM" is not a single number; it depends on which LLM the classical path is actually competing against.
+**Which hosted LLM you would otherwise use changes the crossover by 10x**, which is why "compare to an LLM" is not a single number; it depends on which LLM the classical path is actually competing against.
 
 So at 2M/month, cost alone argues for the cheap-tier LLM. Three other rows in the fuller comparison below are why Section 14's case study still builds the classifier:
 
 ```mermaid
 xychart-beta
     title "Annual cost by path at 2M requests/month"
-    x-axis ["GPT-4o mini", "Claude Haiku 4.5", "DistilBERT yr 1", "DistilBERT yr 2+"]
+    x-axis ["Claude Haiku 5.5", "Claude Haiku 4.5", "DistilBERT yr 1", "DistilBERT yr 2+"]
     y-axis "Annual cost, USD" 0 --> 50000
-    bar [2450, 16800, 48700, 8700]
+    bar [1680, 16800, 48800, 8800]
 ```
 
 The DistilBERT bar is tallest in year one and shortest by year two — the one-time build cost is what makes a classical path look expensive on a single-year view and cheap on a multi-year one, so the horizon you amortize over is itself a modeling choice, not a fact.
@@ -341,7 +343,16 @@ The DistilBERT bar is tallest in year one and shortest by year two — the one-t
 | Interpretability | SHAP/feature attribution against real features | Free-text rationale, not a faithful account of the computation | Same as hosted LLM |
 | Time to first working version | Days–weeks (needs labels) | Hours | Days (needs prompt + eval iteration, not labels) |
 
-**Batch and caching discounts move the crossover further, and are easy to miss.** Both providers cited above discount off-path work: Anthropic's Batch API is 50% off both input and output tokens for requests that do not need a synchronous response, and prompt caching charges as little as 10% of the base input price for a repeated prefix (a fixed system prompt, a repeated set of few-shot examples). A bootstrapping job like Section 14's tail-label pass — non-interactive, and reusing the same instructions across every call — is exactly the shape these discounts target: applying both to the capable-tier price in this table roughly halves its effective per-call cost, which shifts that row's crossover volume from ~1M to ~2M requests/month. Neither discount helps the *synchronous* head-serving path a hybrid keeps on a classical model, which is precisely why they change the economics of the LLM side without changing the case for keeping the SLO-bearing path classical.
+**Batch and caching discounts move the crossover further, and are easy to miss.** Anthropic discounts off-path work two ways: the Batch API is 50% off both input and output tokens for requests that do not need a synchronous response, and a prompt-cache read is billed at 0.1x the base input price for a repeated prefix (a fixed system prompt, a repeated set of few-shot examples); the two multipliers stack. A bootstrapping job like Section 14's tail-label pass — non-interactive, and reusing the same instructions across every call — is exactly the shape these discounts target. Worked for the capable tier, assuming 500 of the 600 input tokens are a cached instruction prefix:
+
+```
+  list price      :  600 x $1.00/M + 20 x $5.00/M                           = $0.000700 / call
+  batch only      :  600 x $0.50/M + 20 x $2.50/M                           = $0.000350 / call
+  batch + cache   :  500 x $0.05/M + 100 x $0.50/M + 20 x $2.50/M           = $0.000125 / call
+  crossover       :  $8,800 / (365 x $0.000125)  = 192,900 calls/day       ~=  5.9M/month
+```
+
+The same model and the same prompt move the crossover from about 1M to about 5.9M requests/month purely through how the calls are billed. Neither discount helps the *synchronous* head-serving path a hybrid keeps on a classical model, which is precisely why they change the economics of the LLM side without changing the case for keeping the SLO-bearing path classical.
 
 **The calibrated-probability row is the one people skip and then regret.** Any product that thresholds a score — "auto-approve above 0.9," "escalate below 0.3" — needs the number to mean the same thing at every point on the scale. A GBDT or a fine-tuned encoder can be calibrated and validated against held-out labels (see `case_studies/cross_cutting/model_calibration_and_thresholding.md`); a prompted LLM asked to output "confidence: 0.87" is reporting a number with no guaranteed relationship to its actual error rate, because nothing in next-token prediction optimizes that number to be calibrated. Section 14's confidence router depends on this distinction directly — it can only route on the student's score, not the LLM's, because only the student's score has been validated to mean what it claims to mean.
 
@@ -366,13 +377,13 @@ The DistilBERT bar is tallest in year one and shortest by year two — the one-t
 | Content moderation at platform scale | Billions/day, sub-second | Abundant for known abuse | Yes (many jurisdictions) | Hybrid — classical filters plus LLM guardrails |
 | Semantic / conversational search | Millions/day, ~200ms-1s | Partial (click logs) | No | Hybrid — embeddings retrieve, LLM reranks or synthesizes |
 | Credit / lending decision | Low-millions/mo, seconds acceptable | Abundant | Yes, strictly | Classical, monotonic, SHAP-explainable — Section 10's pitfall 4 is the failure mode to avoid |
-| Code autocomplete | Every keystroke, <100ms | N/A (self-supervised) | No | Small latency-tuned model on the critical path, larger LLM off it — Section 7's Sourcegraph example |
+| Code autocomplete | Every keystroke, <100ms | N/A (self-supervised) | No | Dedicated completion model plus client-side caching on the critical path, larger LLM off it — Section 7's Sourcegraph example |
 | On-device summarization/assistant | Local, no network round trip | N/A | No | Distilled small model — Section 7's Gemini Nano example |
 | Novel medical/legal Q&A | Low volume, seconds acceptable | Scarce, expert-costly | Often yes | LLM with strong prompting (Section 7's Medprompt result), human sign-off before action |
 
 ## 10. Common Pitfalls
 
-1. **Per-call cost modeled at list price, blown by retries and long context.** A team budgeted GPT-4o mini at 2M calls/month against the $0.000102/call sticker price — about $204/month — and the first invoice came in at **$1,850/month, 9x over budget**. Root cause: a 22% retry rate on malformed JSON output (each retry is a second full call), plus context that had crept from 600 to 4,200 tokens once conversation history got appended for "better context." Fix: switched to structured-output/function-calling mode (retries fell under 2%) and capped history to the last three turns; the bill dropped to $310/month. The list price on a pricing page is never the per-call cost in production — retries and prompt bloat are.
+1. **Per-call cost modeled at list price, blown by retries and long context.** A team budgeted GPT-4o mini ($0.15/$0.60 per MTok at the time) at 2M calls/month against the $0.000102/call sticker price — about $204/month — and the first invoice came in at **$1,570/month, 7.7x over budget**. Root cause: a 22% retry rate on malformed JSON output (each retry is a second full call), plus context that had crept from 600 to 4,200 tokens once conversation history got appended for "better context": `2.44M calls x (4,200 x $0.15/M + 20 x $0.60/M) = 2.44M x $0.000642 = $1,566`. Fix: switched to structured-output/function-calling mode (retries fell under 2%) and capped history to the last three turns, about 900 input tokens; the bill dropped to `2.04M x $0.000147 = $300/month`. The list price on a pricing page is never the per-call cost in production — retries and prompt bloat are.
 
     ```python
     # BROKEN: no structured-output constraint; a malformed response retries unbounded,
@@ -403,7 +414,7 @@ The DistilBERT bar is tallest in year one and shortest by year two — the one-t
 
 | # | Pitfall | Quantified impact | Fix |
 |---|---------|--------------------|-----|
-| 1 | List-price cost model, no retry/context accounting | 9x over budget ($204 -> $1,850/mo) | Structured output, capped history |
+| 1 | List-price cost model, no retry/context accounting | 7.7x over budget ($204 -> $1,570/mo) | Structured output, capped history |
 | 2 | Prototype outgrew its LLM budget, distillation never scheduled | $72,000/yr run rate vs. a $45,000 one-time fix | Budget the migration at launch, not after |
 | 3 | No eval harness catches a silent model-version bump | 6-point accuracy drop over 3 weeks, undetected | Pinned snapshot + nightly golden-set eval |
 | 4 | LLM rationale used as a regulated adverse-action reason | ~$280,000 remediation cost | SHAP-explainable scorecard generates the reason |
@@ -516,7 +527,7 @@ Because nothing in a prompted LLM's training objective ties a self-reported "con
 
 **Q: How do you compute the cost crossover volume using today's published LLM prices instead of a memorized number?**
 **Short:** Divide the classical build cost by the annual per-call savings at current published LLM prices, not a remembered figure.
-Pull the current per-million-token input/output price from the provider's pricing page, multiply by your actual token counts per call to get a real marginal cost, then divide the classical path's build-plus-serving cost by the annual savings at that marginal cost — the same `breakeven_daily = build_cost / (per_call_savings x 365)` formula from Section 6, run with today's numbers instead of an assumption. This matters because the crossover moved by roughly 7x between a cheap-tier and a capable-tier hosted model in Section 8's worked example, using prices read the same day — a number computed six months ago is not safe to reuse. Re-derive it, cite the pricing page and the date you read it, and treat the result as good for that day, not permanently.
+Pull the current per-million-token input/output price from the provider's pricing page, multiply by your actual token counts per call to get a real marginal cost, then divide the classical path's build-plus-serving cost by the annual savings at that marginal cost — the same `breakeven_daily = build_cost / (per_call_savings x 365)` formula from Section 6, run with today's numbers instead of an assumption. This matters because the crossover moved by 10x between a cheap-tier and a capable-tier hosted model in Section 8's worked example, using prices read the same day, and by another 5.6x for the same model once batch and cache discounts applied — a number computed six months ago is not safe to reuse. Re-derive it, cite the pricing page and the date you read it, and treat the result as good for that day, not permanently.
 
 **Q: How do you build an eval harness that catches prompt drift after a provider changes a model version?**
 **Short:** Pin a dated model snapshot, keep a labeled golden set, and run it nightly with an alert on any accuracy drop.
@@ -564,7 +575,7 @@ Start on the LLM specifically because Section 3's Principle 1 can't be evaluated
 
 **Q: What does the Klarna story actually teach, beyond "AI replaced some jobs"?**
 **Short:** Klarna's full LLM-first rollout worked on the metrics it tracked but missed a constraint that only surfaced at scale, forcing a walk-back toward a hybrid.
-It teaches that a full LLM-first rollout can succeed on the metrics being measured — resolution time, conversation volume handled — while missing a constraint that only becomes visible at scale, which in Klarna's case was serious enough that the company reopened hiring for premium human support roles about a year later. The company did not conclude LLMs don't work; it landed on a freelance human-support layer working alongside the AI assistant, which is the hybrid this module argues for from the start, reached the expensive way. The interview lesson is to name the hybrid as a considered option up front, not as a fallback discovered after a full-scale rollout underperforms on a dimension nobody measured initially.
+It teaches that a full LLM-first rollout can succeed on the metrics being measured — resolution time, conversation volume handled — while missing a constraint that only becomes visible at scale: in May 2025, about 15 months after launch, Klarna's CEO said the company would hire human support staff again because cost had been weighted too heavily against service quality. The company did not conclude LLMs don't work; it moved toward AI plus guaranteed access to a human, which is the hybrid this module argues for from the start, reached the expensive way. The interview lesson is to name the hybrid as a considered option up front, not as a fallback discovered after a full-scale rollout underperforms on a dimension nobody measured initially.
 
 **Q: Why is naively A/B testing an LLM against a classical model a weak way to make this decision?**
 **Short:** A naive A/B test compares accuracy alone and misses cost, latency, and calibration differences a single win-rate metric hides.
@@ -595,7 +606,7 @@ At the senior level, this decision is mostly execution: compute the break-even c
 
 | Trigger | Why it moves the decision | Where to check |
 |---------|----------------------------|------------------|
-| Hosted LLM pricing changes | Shifts the crossover volume directly — Section 8 measured a 7x swing between two providers on the same day | Provider pricing page, dated |
+| Hosted LLM pricing changes | Shifts the crossover volume directly — Section 8 measured a 10x swing between two tiers on the same day, and another 5.6x from batch and caching alone | Provider pricing page, dated |
 | Traffic volume grows past the last-computed crossover | The paradigm that was cheaper at launch may no longer be | Section 6/8's break-even formula, re-run with current volume |
 | The task's label availability changes (a backlog gets labeled, or a new regulation removes label access) | Moves which paradigm is even available, not just which is cheaper | Section 3, Principle 1 |
 | A new regulation adds an adverse-action or audit requirement | Can veto an LLM-based design outright, independent of accuracy or cost | Section 9's regulated-decision rules |
@@ -616,7 +627,14 @@ None of these require a redesign by default — most resolve to "re-run the arit
 **The hybrid design.** Wire the router from Section 5's diagram to this shape: the distilled 40-class student serves every ticket synchronously, so the SLO the product experiences is always the student's ~15ms, never the LLM's. The student's softmax confidence is calibrated with temperature scaling against a held-out set, and a ticket whose top-1 calibrated confidence falls below `tau = 0.75` -- tuned to hit 95% precision on the "confident" bucket -- ships a provisional queue assignment immediately (meeting the SLO) while an async call to Claude Haiku, prompted with the full 300-tail-category taxonomy, returns the corrected category. Low-confidence, LLM-corrected tickets stream into a human-review sample that feeds a nightly retrain; as tail categories accumulate teacher-verified volume they graduate into the student's own label space, so the tail the LLM must cover shrinks release over release.
 
 ```python
-def route_ticket(text: str, student, tau: float = 0.75):
+from typing import Any, Protocol
+
+
+class CalibratedStudent(Protocol):
+    def predict_calibrated(self, text: str) -> tuple[str, float]: ...
+
+
+def route_ticket(text: str, student: CalibratedStudent, tau: float = 0.75) -> dict[str, Any]:
     """Synchronous decision only -- this is what the 200ms SLO measures."""
     label, confidence = student.predict_calibrated(text)   # temperature-scaled softmax
     if confidence >= tau:
@@ -631,12 +649,39 @@ def route_ticket(text: str, student, tau: float = 0.75):
 | Path | Year-1 cost | Year-2+ cost | Meets 200ms p99? | Blended routing accuracy |
 |------|------------|---------------|:---:|:---:|
 | All-LLM (Claude Haiku 4.5, every ticket) | ~$16,800 | ~$16,800 | No -- 300-1200ms per call | High on both head and tail, but disqualified on latency |
-| All-classical (DistilBERT, head only, no tail labels) | ~$48,700 | ~$8,700 | Yes -- 5-15ms | ~80% (every tail ticket misrouted) |
-| **Hybrid (student + calibrated router + LLM fallback)** | **~$55,450** | **~$12,750** | **Yes -- the synchronous path is always the student's** | **~91%** |
+| All-classical (DistilBERT, head only, no tail labels) | ~$48,800 | ~$8,800 | Yes -- 5-15ms | ~80% (every tail ticket misrouted) |
+| **Hybrid (student + calibrated router + LLM fallback)** | **~$55,550** | **~$12,850** | **Yes -- the synchronous path is always the student's** | **~91%** |
 
-The hybrid's steady state is `$8,700 (GPU) + $2,554 (LLM fallback) + ~$1,500 (review sampling)`. That is **24% cheaper than routing every ticket through the LLM** while being the *only* option that clears the latency SLO, and it buys roughly **eleven points of routing accuracy** over the all-classical path for about $4,050/year more than the cheapest option -- a trade any team would take once it is written down as a number instead of argued as an intuition.
+The hybrid's steady state is `$8,800 (GPU) + $2,554 (LLM fallback) + ~$1,500 (review sampling) = ~$12,850`. That is **about 24% cheaper than routing every ticket through Claude Haiku 4.5** while being the *only* option that clears the latency SLO, and it buys roughly **eleven points of routing accuracy** over the all-classical path for about $4,050/year more than the cheapest option -- a trade any team would take once it is written down as a number instead of argued as an intuition.
+
+**Re-run with the cheap tier and the cost argument flips, the design does not.** With Claude Haiku 5.5 at $0.00007/call, routing every ticket through the LLM costs about $1,680/year, cheaper than the hybrid's GPU alone, and the fallback line drops from $2,554 to about $255/year. The hybrid is still the design, because the all-LLM path still misses the 200ms p99 on every call. State this in the interview: the cheapest path on paper is disqualified on latency, so price changes move the fallback budget, not the architecture.
 
 **The decision that makes it work, and the one that breaks it.** An earlier pass had the ticket wait for the LLM response before being queued at all whenever confidence was low. That passed every test at low traffic and then breached the SLO the first time the vendor's p99 spiked, because roughly 15% of traffic was bottlenecked on a call the SLO was never designed to include -- and the p99 is measured over *all* traffic, so any branch carrying more than 1% of requests determines it. Serving a provisional label immediately and correcting it asynchronously is not an optimization layered on the design; it is the mechanism that makes the SLO achievable at all. The same decoupling is what makes an LLM outage a delay rather than an incident: a slow provider and a down provider are the same problem from the synchronous path's point of view.
+
+The simulation below puts a number on that sentence. It uses the case study's own split (85% of tickets confident, 15% falling back) and the latency ranges from Section 8.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(7)
+N = 1_000_000
+student_ms = rng.uniform(5, 15, N)            # every ticket pays the student
+needs_llm = rng.random(N) < 0.15              # below tau = 0.75
+llm_ms = rng.uniform(300, 1200, N)            # hosted LLM round trip
+
+# BROKEN: low-confidence tickets wait for the LLM before they are queued
+broken_ms = student_ms + np.where(needs_llm, llm_ms, 0.0)
+
+# FIX: queue a provisional label now; the LLM correction arrives asynchronously
+fixed_ms = student_ms + 0.2                   # enqueue cost only
+
+for name, lat in (("broken", broken_ms), ("fixed", fixed_ms)):
+    print(name, "p50", round(float(np.percentile(lat, 50)), 1), "p99", round(float(np.percentile(lat, 99)), 1))
+# broken p50 about 10, p99 about 1,150  -> SLO breached by 5.7x
+# fixed  p50 about 10, p99 about 15     -> 13x headroom under 200 ms
+```
+
+The broken version's median looks perfect, which is why it passed testing: 85% of tickets never touch the LLM. Its p99 is set entirely by the 15% branch. The top 1% of all tickets is the top `1 / 15 = 6.7%` of the LLM branch, so the p99 lands near `1,200 - 0.067 x 900 = 1,140 ms` plus the student's 15 ms, whatever the LLM's median is. The fix does not make the LLM faster; it removes the LLM from the population the p99 is measured over.
 
 **The full system** -- scale estimation for both cost curves, the label-distillation pipeline, the router's calibration and the conformal alternative, the eval harness that catches prompt drift, the on-call runbooks, eight war stories with quantified impact, capacity planning across both paths, and where the hybrid's economics flip -- is built out as a principal-tier case study in
 **[design_llm_hybrid_support_triage](../case_studies/design_llm_hybrid_support_triage.md)**.

@@ -1304,6 +1304,37 @@ saturated — in every domain deployment the CRF paid for itself.
   individual uncertain spans; switching to per-span *marginals* (forward-backward) fixed
   active-learning selection.
 
+**BROKEN → FIX: subword label leakage, in code.** The first pitfall above comes from one line in the
+label-alignment function that every Hugging Face token-classification pipeline has.
+
+```python
+# word_ids(): one entry per subword token, None for [CLS]/[SEP]/padding
+
+
+# BROKEN: every subword inherits its word's label
+def align_labels_broken(word_labels: list[int], word_ids: list[int | None]) -> list[int]:
+    return [-100 if w is None else word_labels[w] for w in word_ids]
+# "Ibuprofen" -> "ibu ##pro ##fen" -> B-DRUG B-DRUG B-DRUG: three entities, and the CRF
+# learns B-DRUG -> B-DRUG as a legal, frequent transition
+```
+
+```python
+# FIX: only the first subword of each word carries a label; the rest are ignored by the loss
+def align_labels(word_labels: list[int], word_ids: list[int | None]) -> list[int]:
+    out: list[int] = []
+    prev: int | None = None
+    for w in word_ids:
+        out.append(-100 if w is None or w == prev else word_labels[w])
+        prev = w
+    return out
+
+
+enc = tokenizer(words, is_split_into_words=True, truncation=True, max_length=512)
+labels = align_labels(word_labels, enc.word_ids())
+```
+
+`-100` is the `ignore_index` of PyTorch's cross-entropy, so continuation subwords add no loss. With a CRF head the same positions must also be excluded from the CRF's sequence (gather the first-subword emissions into a word-level sequence, with a word-level mask) or the CRF still sees the subword transitions; at inference, read one tag per word from the first subword.
+
 **Nested entities (when BIO is not enough).** If the domain has nesting ("500mg aspirin" — `aspirin`
 = DRUG inside `500mg aspirin` = DOSAGE), no flat BIO CRF can represent it. Escalate to a span-based
 model that enumerates and independently scores `(start, end)` spans, accepting the `O(n^2)` cost with

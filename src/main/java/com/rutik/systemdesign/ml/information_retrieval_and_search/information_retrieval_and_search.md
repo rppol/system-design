@@ -806,6 +806,31 @@ print("mean NDCG@10:", sum(per_query_ndcg) / len(per_query_ndcg))   # 0.61 -- th
 
 **Pitfall 7 -- A bf16 cross-encoder reranker ranking at near-random quality.** A team loaded a sentence-transformers `CrossEncoder` in bfloat16 to halve reranker memory. Before sentence-transformers 6.0 the sigmoid ran in bf16, saturated, and collapsed the top candidates onto a few tied scores: `cross-encoder/ettin-reranker-32m-v1` scored mean NDCG@10 0.18 on three NanoBEIR datasets under v5.7.0 against 0.68 under v6.0.0, which upcasts scoring to float32. Fix: upgrade to 6.x (requires `transformers` 5.x), or keep the reranker in float32, and gate any dtype change on an offline NDCG check.
 
+**Pitfall 3 as code: lowering `efSearch` without measuring recall.**
+
+```python
+# BROKEN: efSearch cut for latency; nothing checks what it costs
+import faiss
+import numpy as np
+
+index.hnsw.efSearch = 20
+_, ids = index.search(queries, 10)
+```
+
+```python
+# FIX: measure recall@10 against exact search before choosing efSearch
+flat = faiss.IndexFlatIP(corpus.shape[1])
+flat.add(corpus)
+_, truth = flat.search(queries, 10)
+for ef in (20, 50, 100, 200):
+    index.hnsw.efSearch = ef
+    _, ids = index.search(queries, 10)
+    recall = np.mean([len(set(a) & set(b)) / 10 for a, b in zip(ids, truth)])
+    print(f"efSearch={ef:4d}  recall@10={recall:.3f}")
+```
+
+An ANN index always returns k results, so a recall collapse shows no errors and no empty pages, only slightly worse rankings that downstream metrics attribute to the ranker. Exact search on a sample of a few thousand queries gives the ground truth for free. Choose the smallest `efSearch` that meets a recall target (for example 0.95) and re-run the check whenever the corpus or the embedding model changes.
+
 ---
 
 ## 11. Technologies & Tools

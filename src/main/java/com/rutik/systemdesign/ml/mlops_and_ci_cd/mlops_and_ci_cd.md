@@ -875,6 +875,33 @@ A team trained a fraud detection model that applied StandardScaler to three nume
 
 Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a single artifact. `mlflow.sklearn.log_model(pipeline, ...)` logs the full pipeline, and `mlflow.sklearn.load_model(uri)` always returns the complete pipeline. A CI integration test posts raw (unscaled) feature vectors to the model server and asserts that predictions fall within the expected range, catching serving skew before deployment.
 
+**War Story 2 as code: features written to the online store without a gate.**
+
+```python
+# BROKEN: whatever the pipeline produced goes live
+online_store.write(features_df)
+```
+
+```python
+# FIX: validate between the pipeline and the store, and fail closed
+import pandas as pd
+
+
+def validate(df: pd.DataFrame, max_null_frac: float = 0.01) -> None:
+    null_frac = df.isna().mean()
+    bad = null_frac[null_frac > max_null_frac]
+    if not bad.empty:
+        raise ValueError(f"null fraction above {max_null_frac:.0%}: {bad.round(3).to_dict()}")
+    if (df.select_dtypes("number").abs() > 1e9).any().any():
+        raise ValueError("numeric feature out of range")
+
+
+validate(features_df)
+online_store.write(features_df)
+```
+
+Most models accept NaN or a default fill without complaint, so a broken upstream join serves predictions for days before a business metric moves. A validation step that raises keeps yesterday's good features in the store and pages the owner instead. Real gates also check row counts and distribution shift; the point is that the check sits on the write path, where it can block the bad data.
+
 ---
 
 ## 11. Technologies & Tools

@@ -13,12 +13,14 @@ the silicon can do. This page is about the layer in between — what the framewo
 Python between `loss.backward()` and the kernel launch, and why that layer is the reason your
 job is slow, non-deterministic, or out of memory.
 
-**This module targets PyTorch 2.14.1**, released 2026-09-30 (2.14.0 went GA on 2026-09-02). Every default, error string,
+**This module targets PyTorch 2.15.0**, released 2026-10-28 (2.14.1 shipped 2026-09-30). Every default, error string,
 signature and dtype policy quoted below was read out of an installed 2.14.1 package
-(CPython 3.12, macOS arm64, CPU/MPS build), not from documentation. Claims that require a CUDA
+(CPython 3.12, macOS arm64, CPU/MPS build), not from documentation, and then checked against the
+2.15.0 release notes; the two 2.15 changes that touch this page (the rewritten NCCL backend
+becoming the default, and the `bfx9` FP32 matmul mode) are tagged `[2.15]`. Claims that require a CUDA
 device — allocator internals, NCCL, CUDA graphs — are marked as such and are sourced from the
 API surface plus the mechanisms described here, not from a run on this machine. Where a
-behaviour changed at a known version the tag is inline: `[2.14]`, `[2.6+]`.
+behaviour changed at a known version the tag is inline: `[2.15]`, `[2.14]`, `[2.6+]`.
 
 The thesis of this page, and the sentence to carry into an interview:
 
@@ -1565,10 +1567,13 @@ without the flag).
 `reduce_scatter_tensor` is now `reduce_scatter_single`. Both old names still resolve (verified) as thin wrappers that emit a `FutureWarning`,
 but new code should use the new ones.
 
-**`nccl2` and `set_timeout` `[2.14]`.** 2.14 ships `nccl2`, a rewritten NCCL c10d backend ported
-from torchcomms, as an eager-only preview and drop-in replacement for `nccl`, with nonblocking
-communicators, fault tolerance and one-sided RMA windows; the release blog says it becomes the
-default from 2.15. A `nccl-lazy` wrapper keeps the old build-communicators-on-first-use behaviour.
+**The rewritten NCCL backend `[2.15]` and `set_timeout` `[2.14]`.** 2.14 previewed `nccl2`, a
+rewritten NCCL c10d backend ported from torchcomms with nonblocking communicators, fault
+tolerance and one-sided RMA windows. In 2.15 it is the default: `backend="nccl"` (also the
+default CUDA backend of `init_process_group()`) creates the new implementation, with a flight
+recorder that dumps on hangs. `nccl` initializes its communicator eagerly; `nccl-lazy` gives each
+send/recv peer pair its own lazily created communicator. The legacy implementation is reachable
+for 2.15 only, through `backend="nccl-legacy"` or `TORCH_DIST_USE_NCCL2=0` set on every rank.
 `torch.distributed.set_timeout` changes a process group's collective timeout after
 initialization, so you can extend it around a slow checkpoint load or shorten it so a wedged rank
 fails fast instead of hanging for the full default window.
@@ -1664,12 +1669,26 @@ within a tolerance rather than that your loss matches to 7 decimal places. Reser
 `use_deterministic_algorithms(True)` for debugging a specific divergence and for tests that
 genuinely need it, not for every training run.
 
-Note that TF32 is a separate axis and a common surprise: on Ampere and later, `torch.backends.
-cuda.matmul.allow_tf32` and `torch.get_float32_matmul_precision()` control whether an "fp32"
-matmul actually runs with 10-bit mantissas on tensor cores. Verified defaults on 2.14.1:
-`allow_tf32` is `False` and `float32_matmul_precision` is `"highest"`. Setting
-`torch.set_float32_matmul_precision("high")` is a large free speedup on Ampere+ and a change in
-your numerics — decide it deliberately rather than discovering it.
+Note that TF32 is a separate axis and a common surprise: on Ampere and later, the per-backend
+`fp32_precision` settings decide whether an "fp32" matmul or convolution actually runs with
+10-bit mantissas on tensor cores. Set them explicitly:
+
+```python
+import torch
+
+torch.backends.cuda.matmul.fp32_precision = "tf32"   # "ieee" keeps full FP32
+torch.backends.cudnn.conv.fp32_precision = "tf32"
+# Blackwell cc 10.0/10.3 with a CUDA 12.9+ build [2.15]: FP32 in and out, cuBLAS BF16x9 inside
+# torch.backends.cuda.matmul.fp32_precision = "bfx9"
+```
+
+`torch.set_float32_matmul_precision("high")` remains the device-agnostic global shortcut
+(verified default on 2.14.1: `"highest"`, so TF32 is off until you ask). PyTorch's CUDA notes
+state that mixing these settings with the older `allow_tf32` booleans is not supported, so pick
+the new API everywhere in a codebase. TF32 is a large speedup — on an A100, 156 TFLOP/s against
+19.5 TFLOP/s for FP32, and ~7x measured in PyTorch's own 10240x10240 benchmark — and a change in
+your numerics of about two orders of magnitude in relative error; decide it deliberately rather
+than discovering it.
 
 ---
 
@@ -1899,7 +1918,7 @@ buffer the DMA has not filled. This is intermittent — it works when the GPU ha
 
 ## 11. Technologies & Tools
 
-- **PyTorch** — the framework. Version 2.14.1, released 2026-09-30, BSD-3-Clause, governed by the PyTorch Foundation under the Linux Foundation.
+- **PyTorch** — the framework. Version 2.15.0, released 2026-10-28, BSD-3-Clause, governed by the PyTorch Foundation under the Linux Foundation.
 - **torch.compile** — the JIT entry point. Modes `default`, `lite`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`.
 - **TorchDynamo** — the CPython frame-evaluation hook that captures an FX graph plus guards from bytecode. Where graph breaks and recompiles come from.
 - **AOTAutograd** — traces forward and backward ahead of time into a joint ATen graph and partitions it, deciding what to save versus recompute.
@@ -1918,7 +1937,7 @@ buffer the DMA has not filled. This is intermittent — it works when the GPU ha
 - **DistributedDataParallel** — gradient bucketing overlapped with backward. Default bucket 25 MiB, smaller first bucket.
 - **FSDP2** — per-parameter `DTensor` sharding through `torch.distributed.fsdp.fully_shard`, composing with `torch.compile` and tensor parallelism.
 - **torch.distributed.checkpoint** — sharded, parallel, reshardable checkpointing. The right way to save an FSDP model.
-- **NCCL** — the GPU collective library underneath `torch.distributed` on NVIDIA hardware. 2.14 adds the `nccl2` c10d backend as a preview.
+- **NCCL** — the GPU collective library underneath `torch.distributed` on NVIDIA hardware. In 2.15 the rewritten c10d NCCL backend is the default for `backend="nccl"`.
 - **torch.nn.attention** — `sdpa_kernel` backend selection (`FLASH_ATTENTION`, `EFFICIENT_ATTENTION`, `CUDNN_ATTENTION`, `MATH`) and **FlexAttention** for custom masks and score modifications.
 - **torch.func** — composable transforms: `grad`, `vmap`, `jacrev`, `jacfwd`, `hessian`, `functional_call`, `stack_module_state`.
 - **torch.ao.quantization** — the quantization surface; **torchao** is where the modern fp8 and low-bit recipes live.
@@ -2018,7 +2037,7 @@ The verified 2.14 warning text is ``` `torch.jit.script` is deprecated. Please s
 `DistributedDataParallel` wraps your model as `self.module`, so `ddp_model.state_dict()` produces keys like `module.lin.weight`. Loading that into an unwrapped model with `strict=True` raises immediately, which is the good outcome. With `strict=False` — usually added earlier for a legitimate reason, such as a replaced classification head — every key lands in `unexpected_keys`, every model key lands in `missing_keys`, the call returns successfully, and the weights are still at initialization. Save `ddp_model.module.state_dict()`; strip the prefix on load for legacy files; and make it a rule that `strict=False` is always followed by an assertion on the returned `missing_keys` and `unexpected_keys` sets.
 
 **Q: What exactly does `model.eval()` change?**
-**Short:** Only dropout and batch normalization. It does not disable gradients, does not save memory, and does not make anything faster.
+**Short:** It changes only dropout and batch normalization, and does not disable gradients, save memory or make anything faster.
 
 `eval()` sets `self.training = False` recursively. Dropout becomes an identity; BatchNorm switches from batch statistics to its stored running averages and stops updating them. LayerNorm, GroupNorm, RMSNorm and attention are unaffected. The two symmetric errors are both common: forgetting `eval()` before validation lets validation data update your BatchNorm statistics and makes predictions depend on batch composition, while forgetting `train()` afterwards silently disables dropout for the rest of the run — the model converges worse and nothing says why. Use a `try/finally` or a context manager. Note also that freezing BatchNorm by setting `requires_grad=False` does not stop the running statistics updating, because those are buffers; call `.eval()` on those modules specifically.
 
@@ -2093,7 +2112,7 @@ Broadcasting aligns shapes from the right and expands any dimension of size 1 by
 `model.to(memory_format=torch.channels_last)` plus the same on the input reorders the bytes to NHWC while keeping NCHW logical indexing. Verified: a `(2,3,4,5)` channels-last tensor has strides `(60,1,15,3)`, reports `is_contiguous()` as `False` and `is_contiguous(memory_format=torch.channels_last)` as `True`. It is worth doing because cuDNN's fastest convolution kernels are written for NHWC, so feeding NCHW makes cuDNN insert a transpose around every convolution. The gain is real on convolutional networks with mixed precision and essentially nil on transformers, which have no convolutions. The thing to internalize is that a `False` from `is_contiguous()` in a CNN is expected rather than a bug — check against the memory format you actually chose.
 
 **Q: What is the difference between `detach()` and `clone()`?**
-**Short:** `detach` gives a new tensor sharing the same storage with gradient tracking off; `clone` copies the data and stays in the graph. Use both together for an independent value.
+**Short:** `detach` returns a tensor sharing storage with gradient tracking off while `clone` copies the data and stays in the graph, so use both for an independent value.
 
 `detach()` returns a tensor with the same `data_ptr` (verified), `requires_grad=False` and `is_leaf=True` — it cuts the graph edge but shares bytes, so mutating either is visible through both. `clone()` allocates and copies but is itself a differentiable operation, so gradients flow through it back to the source. The combinations: `.detach()` to read a value out of the graph cheaply, `.clone()` to get an independent copy that still participates in autograd, `.detach().clone()` for a fully independent snapshot, and `.item()` for a scalar as a Python float. Getting this wrong shows up as either a mysterious in-place mutation of your source tensor or as pitfall 1's memory leak, depending on which half you forgot.
 
@@ -2195,10 +2214,11 @@ seed, data version and config, and log them (see
 [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md)). Assert metrics within a tolerance.
 Reserve `use_deterministic_algorithms(True)` for debugging a specific divergence.
 
-**Decide TF32 deliberately.** `torch.set_float32_matmul_precision("high")` is a large free
-speedup on Ampere and later and a real change to your numerics. Verified 2.14 defaults are
-`allow_tf32=False` and `"highest"`, so you will not get it by accident — but you also will not
-get the speedup until you ask.
+**Decide TF32 deliberately.** `torch.backends.cuda.matmul.fp32_precision = "tf32"` (or the global
+`torch.set_float32_matmul_precision("high")`) is a large speedup on Ampere and later and a real
+change to your numerics. The verified 2.14.1 default is `"highest"`, so you will not get it by
+accident — but you also will not get the speedup until you ask. Do not mix the `fp32_precision`
+settings with the older `allow_tf32` flags.
 
 **Read the generated Triton once.** `TORCH_LOGS="output_code"` on a model you understand teaches
 more about what Inductor does than any amount of documentation, and it makes "why did this not
@@ -2295,10 +2315,16 @@ baseline" was in fact an *untrained* head on a correctly trained backbone, and t
 not even stable between evaluation runs.
 
 ```python
-# save
+# BROKEN: DDP-prefixed keys loaded with strict=False; nothing loads and nothing errors
+torch.save(ddp_model.state_dict(), path)      # keys: "module.backbone.conv1.weight", ...
+model.load_state_dict(torch.load(path, weights_only=True), strict=False)
+# every saved key is "unexpected", every model key is "missing", and the return value is ignored
+```
+
+```python
+# FIX: save the unwrapped module, and make strict=False prove it loaded what you expected
 torch.save(ddp_model.module.state_dict(), path)
 
-# load
 result = model.load_state_dict(torch.load(path, weights_only=True), strict=False)
 assert not result.unexpected_keys, result.unexpected_keys
 assert set(result.missing_keys) <= EXPECTED_NEW_HEAD_KEYS, result.missing_keys

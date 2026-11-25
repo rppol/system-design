@@ -1126,3 +1126,45 @@ flowchart TD
 - DeBERTa over BERT-base: +7 weighted F1 points for same inference cost
 - Per-class evaluation caught silent failures on the "LIMITATION OF LIABILITY" clause type (only 120 examples: weighted F1 looked fine, that class's own F1 was 0.52) — the macro-vs-weighted gap in action
 - Kept LR at 2e-5 after an incident at 5e-5 that caused >30% High-Risk recall collapse on epoch 2 validation
+
+**BROKEN → FIX: class weights that never reach the loss.** The `class_weights = [3.0, 2.0, 1.0]` line in the Phase 2 config does nothing with a stock `Trainer`.
+
+```python
+import torch
+from transformers import Trainer
+
+# BROKEN: weights computed, model trained with the model's own unweighted cross-entropy
+class_weights = torch.tensor([3.0, 2.0, 1.0])            # [High, Medium, Low]
+trainer = Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds)
+trainer.train()
+# AutoModelForSequenceClassification computes plain CrossEntropyLoss from `labels`;
+# nothing reads class_weights, so High-Risk recall is whatever the 3K/4K/8K mix gives
+```
+
+```python
+from typing import Any
+
+import torch.nn.functional as F
+from torch import nn
+
+
+# FIX: override compute_loss so the weights are applied
+class WeightedTrainer(Trainer):
+    def __init__(self, *args: Any, class_weights: torch.Tensor, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model: nn.Module, inputs: dict[str, Any], return_outputs: bool = False,
+                     num_items_in_batch: torch.Tensor | int | None = None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        loss = F.cross_entropy(outputs.logits, labels,
+                               weight=self.class_weights.to(outputs.logits.device))
+        return (loss, outputs) if return_outputs else loss
+
+
+trainer = WeightedTrainer(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds,
+                          class_weights=class_weights)
+```
+
+The weight order must match the model's `id2label` (here 0 = High, 1 = Medium, 2 = Low); a mismatched order up-weights the wrong class and looks exactly like "weighting did not help". The override keeps the signature of `Trainer.compute_loss` in current `transformers`, including `num_items_in_batch`, so it composes with gradient accumulation.

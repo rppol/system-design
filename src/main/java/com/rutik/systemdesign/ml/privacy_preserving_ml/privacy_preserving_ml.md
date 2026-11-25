@@ -745,6 +745,33 @@ C too small clips away the real gradient signal (the model won't learn); C too l
 
 Local DP's per-user noise only averages out with huge N. Deploying local DP to a 10k-user product and expecting Apple-quality aggregates yields garbage — the noise swamps the signal. Local DP needs millions of contributions; below that, prefer central DP with a trusted aggregator or secure aggregation.
 
+**Pitfalls 1 and 6 as code: noise without per-example clipping.**
+
+```python
+# BROKEN: noise on the averaged gradient; one example's influence is unbounded
+import torch
+
+loss.backward()
+for p in model.parameters():
+    p.grad += torch.randn_like(p.grad) * 0.1
+optimizer.step()
+```
+
+```python
+# FIX: DP-SGD -- clip each example's gradient to C, add noise calibrated to C, track epsilon
+from opacus import PrivacyEngine
+
+engine = PrivacyEngine()
+model, optimizer, loader = engine.make_private_with_epsilon(
+    module=model, optimizer=optimizer, data_loader=loader,
+    target_epsilon=3.0, target_delta=1e-5, epochs=10, max_grad_norm=1.0,
+)
+# ... train as usual ...
+print(f"epsilon spent: {engine.get_epsilon(delta=1e-5):.2f}")
+```
+
+The broken loop trains and the noise even acts as a mild regulariser, so it looks like a privacy feature. It provides no guarantee: without clipping, one outlier example can move the gradient arbitrarily far, and no amount of fixed noise bounds that. Opacus computes per-sample gradients, clips them to `max_grad_norm`, sets the noise multiplier to reach the target epsilon and reports the budget spent.
+
 ---
 
 ## 11. Technologies & Tools

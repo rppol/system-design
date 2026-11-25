@@ -762,6 +762,33 @@ a measured recall curve on *your* vectors and stop at the knee.
 
 **Pitfall 5 — Retrieval recall at 95% but ranking at wrong items**: The retrieval stage achieved 95% recall@100, but the ranking stage's NDCG@10 remained poor. Investigation showed the 5% of missed items were disproportionately the most relevant ones — the items users clicked on most were also the most popular, and the IVF index clustered them together in centroid regions not searched by nprobe=32. Fix: analyze which items are most frequently in ground truth but not in retrieved candidates; if they cluster in specific categories, increase n_lists (more fine-grained clusters) or add those items as a separate "always-include" source.
 
+**Pitfall 2 as code: nprobe tuned once and never re-checked.**
+
+```python
+# BROKEN: nprobe chosen for latency when the index held 1M items
+index.nprobe = 8
+```
+
+```python
+# FIX: choose nprobe from a recall target measured against exact search
+import faiss
+import numpy as np
+
+
+def pick_nprobe(index: faiss.IndexIVF, flat: faiss.Index, queries: np.ndarray,
+                k: int = 100, target: float = 0.95) -> int:
+    _, truth = flat.search(queries, k)
+    for nprobe in (8, 16, 32, 64, 128, 256):
+        index.nprobe = nprobe
+        _, got = index.search(queries, k)
+        recall = np.mean([len(set(a) & set(b)) / k for a, b in zip(got, truth)])
+        if recall >= target:
+            return nprobe
+    return 256
+```
+
+IVF recall depends on how many vectors sit in each list, so as the catalogue grows the same `nprobe` covers a smaller share of it. Retrieval still returns k items and ranking still re-orders them, so the drop appears only as a slow decline in engagement. Run `pick_nprobe` in the index build job and fail the build if no setting meets the target within the latency budget.
+
 ---
 
 ## 11. Technologies & Tools
@@ -813,8 +840,8 @@ Each source runs independently and generates candidates with a relevance score. 
 
 MMR is a greedy re-ranking algorithm that balances relevance and diversity. At each step, it selects the next item maximizing: lambda * relevance(i) - (1 - lambda) * max_j_selected similarity(i, j). Lambda = 1 means pure relevance ordering; lambda = 0 means pure diversity (farthest-first traversal). MMR is used in re-ranking when you want to prevent the final list from containing 10 items from the same category. It is O(K * M) per recommendation list (K = final list size, M = candidate set size), which is acceptable for small K and M. For larger sets, Determinantal Point Processes (DPP) give a more principled probabilistic approach but are computationally heavier.
 
-**Q: What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
-**Short:** Pointwise scores items independently, pairwise compares item pairs, and listwise optimizes the entire ranked list.
+**Q: How do pointwise, pairwise and listwise LTR losses differ in what they optimize for a recommender ranker?**
+**Short:** Pointwise fits each item's relevance alone, pairwise (BPR, RankNet) fits the order of item pairs, and listwise (LambdaMART, ListNet) optimizes a list metric such as NDCG.
 
 Pointwise LTR treats each (user, item) pair independently, predicting a relevance score or click probability — standard binary cross-entropy. Simple but ignores the ranking context (an item's optimal score depends on the other items in the list). Pairwise LTR (BPR, RankNet) considers pairs: for each pair (item_i, item_j), the model should rank item_i above item_j if item_i is more relevant. Directly optimizes pairwise ordering but not the list-level metric. Listwise LTR (LambdaMART, ListNet, SoftRank) optimizes the full list ordering — the gradient accounts for the effect of each item's score on the list-level metric (NDCG, MAP). Listwise achieves the best NDCG but is hardest to implement.
 
@@ -940,3 +967,33 @@ RESULTS:
   Time-to-first-application (new users): -40% (better cold start)
   Recall@100 two-tower: 94.7% (validated weekly against brute force)
 ```
+
+**BROKEN → FIX: filtering ANN results after the search.** Location and recency filters are applied to
+the 400 two-tower candidates in many first implementations, which empties the source for selective filters.
+
+```python
+import faiss
+import numpy as np
+
+# BROKEN: retrieve 400, then keep the ones in the user's location
+D, I = index.search(user_vec, 400)
+cands = [j for j in I[0] if j != -1 and job_location[j] == user_loc]
+# a location that holds 0.5% of 3M listings keeps about 400 x 0.005 = 2 of the 400 results
+```
+
+```python
+# FIX: restrict the search itself to allowed ids, so all 400 results satisfy the filter
+allowed = np.flatnonzero(job_location == user_loc).astype("int64")
+params = faiss.SearchParametersIVF(sel=faiss.IDSelectorBatch(allowed), nprobe=64)
+D, I = index.search(user_vec, 400, params=params)
+cands = [j for j in I[0] if j != -1]
+if len(cands) < 400:   # very selective filter: score the allowed listings exactly instead
+    exact = job_vectors[allowed] @ user_vec[0]          # (len(allowed),) inner products
+    cands = allowed[np.argsort(-exact)[:400]].tolist()
+```
+
+The post-filter's yield is the filter's selectivity times k, so it fails exactly for small markets, which
+are also the users with the fewest alternatives. The selector moves the filter inside the IVF scan; with
+`nprobe=64` of 512 lists a very selective filter can still return fewer than 400 hits (FAISS pads with
+`-1`), and for an allowed set of a few tens of thousands of listings an exact dot product over just those
+vectors is both faster and complete.

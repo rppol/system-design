@@ -685,6 +685,25 @@ Team renamed column `user_revenue` to `user_total_revenue` in a Parquet dataset.
 **Pitfall 5 — Null handling inconsistency**
 Training pipeline uses `.fillna(0)` for missing purchase features. Serving pipeline returns `None` when the user has no purchase history (different code path). Model learned that 0 means "new user" but at serving time receives None — feature value treated as 0 or NaN depending on the serving framework. Fix: encode missing as a sentinel value (-1 for "no history") consistently, or use a dedicated `has_purchase_history` boolean feature.
 
+**Pitfall 2 as code: labels joined to today's feature snapshot.**
+
+```python
+# BROKEN: every historical label sees features computed today
+import pandas as pd
+
+train = labels.merge(features_latest, on="user_id")
+```
+
+```python
+# FIX: as-of join -- each label sees the newest feature row strictly before its timestamp
+labels = labels.sort_values("event_ts")
+features = features.sort_values("feature_ts")
+train = pd.merge_asof(labels, features, left_on="event_ts", right_on="feature_ts",
+                      by="user_id", direction="backward", allow_exact_matches=False)
+```
+
+The broken join gives every row a complete, plausible feature vector, and offline AUC goes up, because features computed today already reflect what happened after each label. Production can only see the past, so the live metric falls. `merge_asof` with `direction="backward"` and `allow_exact_matches=False` reproduces what was knowable at each event. Both frames must be sorted on their time keys or it raises.
+
 ---
 
 ## 11. Technologies & Tools

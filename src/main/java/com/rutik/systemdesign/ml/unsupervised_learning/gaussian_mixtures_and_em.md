@@ -822,6 +822,28 @@ GMM is the parametric middle ground: far more expressive than one Gaussian, far 
 
 **Pitfall 7 — Log-of-product underflow in a hand-rolled E-step.** Multiplying many small Gaussian densities underflows to 0 in float64, making responsibilities `0/0 = NaN`. Fix: work entirely in log-space and normalize with log-sum-exp (`scipy.special.logsumexp`), exactly as in §6.2. sklearn already does this internally.
 
+**Pitfall 7 as code: densities multiplied in probability space.**
+
+```python
+# BROKEN: the product over 200 dimensions underflows to 0; responsibilities become 0/0
+import numpy as np
+from scipy.stats import norm
+
+dens = np.prod(norm.pdf(X[:, None, :], mu[None], sd[None]), axis=2)     # [n, K]
+resp = w * dens / (w * dens).sum(axis=1, keepdims=True)
+```
+
+```python
+# FIX: sum log densities and normalise with logsumexp
+from scipy.special import logsumexp
+
+log_dens = norm.logpdf(X[:, None, :], mu[None], sd[None]).sum(axis=2)  # [n, K]
+log_r = np.log(w) + log_dens
+resp = np.exp(log_r - logsumexp(log_r, axis=1, keepdims=True))
+```
+
+Each per-dimension density can be well below 1, and a product of 200 of them falls below the smallest float64 (about 1e-308), so every component's density is exactly 0 and the responsibilities are NaN. The E-step then poisons the M-step without an exception. Working in log space and subtracting the row maximum through `logsumexp` keeps every value finite; scikit-learn's `GaussianMixture` does the same internally.
+
 ---
 
 ## 11. Technologies & Tools

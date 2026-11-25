@@ -848,6 +848,31 @@ A team reimplemented BYOL without BatchNorm in the predictor MLP (replacing with
 **Pitfall 5: Evaluating SSL with accuracy instead of linear probe accuracy**
 A team compared a supervised ResNet-50 (76.1% top-1) vs a BYOL-pretrained ResNet-50 evaluated with KNN (only 74.3%) and concluded supervised was better. But BYOL fine-tuned achieves 79.6% — better than supervised. The comparison must use matched protocols. Linear probe and KNN evaluate representation quality; fine-tuning evaluates maximum downstream accuracy. These answer different questions and should not be compared directly.
 
+**Pitfall 2 as code: contrastive views that differ only by a flip.**
+
+```python
+# BROKEN: weak views -- the task can be solved by matching colour histograms
+import torch
+from torchvision.transforms import v2
+
+weak = v2.Compose([v2.RandomHorizontalFlip(), v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
+```
+
+```python
+# FIX: the SimCLR recipe -- random resized crop plus strong colour distortion
+strong = v2.Compose([
+    v2.RandomResizedCrop(224, scale=(0.08, 1.0)),
+    v2.RandomHorizontalFlip(),
+    v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
+    v2.RandomGrayscale(p=0.2),
+    v2.RandomApply([v2.GaussianBlur(kernel_size=23, sigma=(0.1, 2.0))], p=0.5),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
+])
+```
+
+With flips only, two views of an image share the same colours and almost the same pixels, so the encoder learns a shortcut (colour statistics) and the contrastive loss drops quickly. The linear-probe accuracy is what reveals it. The SimCLR ablations found that the combination of cropping and colour distortion was what made the representation useful, so keep both and tune their strength rather than removing either.
+
 ---
 
 ## 11. Technologies & Tools
@@ -997,3 +1022,30 @@ Register tokens are extra learnable tokens added to the ViT input sequence that 
 **Fine-tuning**: full fine-tuning with layer-wise LR decay (0.65), base LR 5e-5, 100 epochs. Results: 82% macro-F1 — 11% improvement over supervised baseline. Per-class analysis: rare pathology classes (pleural effusion: 180 labels) improved from 42% to 71% F1 — the SSL features captured relevant features from unlabeled data with that pathology.
 
 **Production**: model exported to ONNX, quantized to INT8 (< 1% F1 drop), deployed on CPU inference cluster. 4 slices processed in parallel per scan; full scan (150 slices) classified in 2.5 seconds.
+
+**BROKEN → FIX: ImageNet colour jitter on a slice stack.** The input here is three adjacent CT slices stacked as RGB channels, and the standard SSL augmentation silently destroys that.
+
+```python
+from torchvision.transforms import v2
+
+# BROKEN: the ImageNet SSL recipe applied to a (slice-1, slice, slice+1) stack
+broken_aug = v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
+# saturation blends each channel toward the mean of the three, hue rotates the channels into
+# each other: both mix ADJACENT SLICES, so the 3D context the stack encodes is corrupted
+```
+
+```python
+import torch
+
+
+# FIX: jitter the viewing window on raw Hounsfield units, identically for all three slices
+def window_jitter(hu_stack: torch.Tensor,
+                  center: tuple[float, float] = (-600.0, 400.0),
+                  width: tuple[float, float] = (400.0, 1600.0)) -> torch.Tensor:
+    """hu_stack: (3, H, W) in HU. Ranges are illustrative: set them from your radiologists' windows."""
+    c = torch.empty(1).uniform_(*center)
+    w = torch.empty(1).uniform_(*width)
+    return ((hu_stack - (c - w / 2)) / w).clamp_(0.0, 1.0)   # per-pixel monotone, no channel mixing
+```
+
+The fix applies one monotone intensity map per sample, so a denser voxel never becomes brighter than a less dense one and no slice leaks into its neighbour; what varies is which HU range is visible, which is exactly the variation a radiologist introduces by switching windows. That is the invariance the pretraining should learn, and it is why the clinic's DINO run replaced colour jitter rather than adding to it.

@@ -44,6 +44,18 @@ The core mental model:
 
 **Transfer learning**: pretrain on large labeled corpus → fine-tune on target task. Freezing early layers and training only the final classifier (linear probing) is the minimal intervention; full fine-tuning with a low learning rate (1e-4 to 1e-5) achieves higher accuracy on sufficiently large target datasets.
 
+**Worked example: receptive field grows by (k - 1) x jump per layer.** For layer `l` with kernel `k_l` and stride `s_l`, the receptive field `r` and the jump `j` (input pixels between adjacent output positions) follow `r_l = r_(l-1) + (k_l - 1) x j_(l-1)` and `j_l = j_(l-1) x s_l`, starting from `r_0 = 1, j_0 = 1`.
+
+| Layers | r | j | Note |
+|---|---|---|---|
+| one 3x3, stride 1 | 1 + 2 x 1 = 3 | 1 | |
+| three 3x3, stride 1 | 3 + 2 + 2 = 7 | 1 | same field as one 7x7 with `27C^2` weights instead of `49C^2` (45% fewer) |
+| ResNet stem: 7x7 stride 2 | 1 + 6 x 1 = 7 | 2 | |
+| + 3x3 max-pool stride 2 | 7 + 2 x 2 = 11 | 4 | |
+| + 3x3 conv stride 1 | 11 + 2 x 4 = 19 | 4 | each later 3x3 adds 8 pixels at this stage |
+
+This is why VGG and ResNet stack 3x3 convolutions instead of using large kernels: the same receptive field with fewer weights and more nonlinearities. It also explains why downsampling early is cheap in compute but expensive in detail: after the stem every step of the feature map covers 4 input pixels, so an object smaller than ~4 pixels can no longer be localised.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -510,11 +522,11 @@ all ten thresholds, so they are not comparable to a quoted `mAP@0.5` such as the
 
 ## 7. Real-World Examples
 
-**Autonomous vehicles**: Tesla FSD uses a multi-camera vision-only stack. Each camera feed runs a backbone (similar to ViT) to produce bird's-eye-view feature maps. Detection heads localize vehicles, pedestrians, and lane markings at ~36 fps per camera.
+**Autonomous vehicles**: Tesla's camera-only stack, as presented at its 2021 AI Day, runs each of eight cameras (1280x960 at 36 Hz) through a RegNet backbone with a BiFPN, then fuses the per-camera features into one bird's-eye-view space with a transformer before the detection and lane heads run. The design point is to fuse in feature space rather than stitching images, so an object seen by two cameras becomes one detection.
 
 **Medical imaging**: U-Net variants dominate radiology segmentation. A chest X-ray pneumonia detection model fine-tuned from DenseNet-121 on CheXpert achieves AUC ~0.91. The same backbone serves multiple pathology classifiers via multi-label heads.
 
-**Content moderation**: Instagram/Meta runs EfficientNet-B5 inference to classify uploaded images for nudity, violence, and spam at ~50M images/day. Inference is batched on A10G GPUs; models serve behind an internal inference API.
+**Content moderation (illustrative sizing)**: an upload-time image classifier is a throughput problem first. 50M images/day is `50,000,000 / 86,400 = 579` images/s on average; with a 3x daily peak that is ~1,740 images/s. If one GPU sustains 1,000 images/s at batch 64 for the chosen backbone (measure it; it varies several-fold between an EfficientNet-B0 and a ViT-L), the peak needs 2 GPUs, and N+1 redundancy across two zones makes it 4. The batching window is what keeps latency acceptable: at 1,740 images/s a batch of 64 fills in 37 ms.
 
 **Industrial inspection**: PCB defect detection uses YOLO models fine-tuned on 10k–50k annotated boards. mAP@0.5 of 0.92+ is routinely achieved; false-negative rate below 0.1% is the production SLA.
 
@@ -575,6 +587,26 @@ Training used `RandomResizedCrop(224)` (crops down to 8% of image area). Validat
 
 **Pitfall 5: Not freezing BatchNorm during fine-tuning**
 When fine-tuning with a small batch (< 16) on a new domain, BatchNorm running statistics computed on the tiny batch degrade the pretrained statistics. Fix: call `model.eval()` on BN layers or use `freeze_bn()` to keep running mean/var frozen during the first few epochs.
+
+**Pitfall 1 as code: pretrained weights fed un-normalized pixels.**
+
+```python
+# BROKEN: a pretrained ResNet sees raw [0, 1] tensors
+from torchvision import transforms
+
+tf = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor()])
+```
+
+```python
+# FIX: take the preprocessing from the weights object, so it always matches the checkpoint
+from torchvision.models import ResNet50_Weights, resnet50
+
+weights = ResNet50_Weights.IMAGENET1K_V2
+model = resnet50(weights=weights).eval()
+tf = weights.transforms()          # resize, crop, scale to [0, 1], ImageNet mean/std
+```
+
+Nothing crashes in the broken version and the model still returns confident classes. But the network was trained on inputs centred near 0 with unit variance (ImageNet mean about 0.45, standard deviation about 0.23 per channel), and raw `[0, 1]` pixels arrive shifted and about 4x too narrow, so top-1 accuracy drops by a large margin. Tying the transform to the weights object removes the chance of a mismatch when the checkpoint changes.
 
 ---
 

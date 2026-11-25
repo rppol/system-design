@@ -842,6 +842,26 @@ By default, GaussianNB and MultinomialNB estimate P(y=k) from the training class
 **Pitfall 6 — Ignoring feature dependencies in correlated feature sets**
 A Bayesian network (an extension of Naive Bayes that models dependencies) team simplified their model to NB to save engineering time. Their features included (systolic BP, diastolic BP, pulse pressure) — pulse pressure = systolic - diastolic, perfectly linear combination. NB "double-counted" the blood pressure information: it appeared three times independently. The NB model became overconfident. Fix: remove redundant features before applying NB. Feature correlation analysis (correlation matrix, VIF) should precede NB training.
 
+**Pitfall 1 as code: maximum-likelihood word probabilities.**
+
+```python
+# BROKEN: a word never seen with a class gets probability 0 for that class
+import numpy as np
+
+p_word = counts / counts.sum(axis=1, keepdims=True)        # [classes, vocab]
+log_post = np.log(prior) + x @ np.log(p_word).T           # log(0) = -inf; 0 * -inf = nan
+```
+
+```python
+# FIX: Laplace (add-alpha) smoothing, what MultinomialNB(alpha=1.0) does by default
+alpha = 1.0
+p_word = (counts + alpha) / (counts.sum(axis=1, keepdims=True) + alpha * counts.shape[1])
+log_post = np.log(prior) + x @ np.log(p_word).T
+pred = log_post.argmax(axis=1)
+```
+
+In the broken version, one unseen word sends a class's score to minus infinity, and a word that is absent from the document (count 0) multiplies `-inf` and produces NaN. `argmax` over a row containing NaN returns the position of the first NaN rather than raising. Smoothing gives every word a small probability for every class, which keeps the scores finite and lets the other words decide.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1036,3 +1056,33 @@ flowchart TD
 - Daily retraining adapts to new spam campaigns within 24 hours
 
 **Lesson**: MultinomialNB is the correct production choice here, not gradient boosting or a transformer. The constraints (2ms latency, daily retraining of 10M examples, 8MB model size, human-interpretable audit trail) all favor NB's simplicity. Gradient boosting would require 50-200ms inference and hours of daily retraining. A transformer would require GPU infrastructure. The 2-3% accuracy gap between NB and gradient boosting is irrelevant compared to the 100x engineering complexity difference.
+
+**BROKEN → FIX: a re-fitted vocabulary feeding an incrementally trained model.** The architecture uses `HashingVectorizer` for a reason this pair makes concrete.
+
+```python
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+
+
+# BROKEN: a new vocabulary every night, the same model updated with partial_fit
+def nightly_update_broken(model: MultinomialNB, emails: list[str], labels: list[int]) -> MultinomialNB:
+    vec = CountVectorizer().fit(emails)      # column 4,812 was "invoice" yesterday, "lottery" today
+    model.partial_fit(vec.transform(emails), labels, classes=[0, 1])
+    return model
+# raises a feature-count mismatch the first night the vocabulary size changes; on a night it happens
+# to match, today's counts are added onto yesterday's columns for different words, with no error
+```
+
+```python
+from sklearn.feature_extraction.text import HashingVectorizer
+
+# FIX: a stateless vectorizer, so a word maps to the same column forever
+VEC = HashingVectorizer(n_features=2**20, alternate_sign=False, norm=None)
+
+
+def nightly_update(model: MultinomialNB, emails: list[str], labels: list[int]) -> MultinomialNB:
+    model.partial_fit(VEC.transform(emails), labels, classes=[0, 1])
+    return model
+```
+
+`partial_fit` accumulates per-class feature counts by column index, so the index-to-word mapping must never change for the life of the model; hashing guarantees that without storing anything. `norm=None` matters as much as `alternate_sign=False`: the default `norm="l2"` turns each email's counts into fractions, which MultinomialNB accepts without complaint but which are no longer the word counts its likelihoods assume.

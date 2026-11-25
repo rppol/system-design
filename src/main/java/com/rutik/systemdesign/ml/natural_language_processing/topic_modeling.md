@@ -1245,3 +1245,32 @@ flowchart LR
   five useless near-duplicate topics.
 - Kept topics for analytics and routing suggestions only; the SLA-breach escalation decision stayed
   rule-based rather than trusting soft topic proportions.
+
+**BROKEN → FIX: a topic model that changes every time it is fitted.** The monthly re-fit and the
+3-sigma spike alert both assume that "topic 12" means the same thing between runs.
+
+```python
+from bertopic import BERTopic
+
+# BROKEN: library-default UMAP is stochastic, so topics (and their ids) differ on every fit
+topic_model = BERTopic(embedding_model="all-MiniLM-L6-v2", min_topic_size=50)
+topics, _ = topic_model.fit_transform(docs)
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+from umap import UMAP
+
+# FIX: fixed UMAP seed, and embeddings computed once and reused across experiments
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = embedder.encode(docs, batch_size=256, show_progress_bar=False)
+umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric="cosine", random_state=42)
+topic_model = BERTopic(embedding_model=embedder, umap_model=umap_model, min_topic_size=50)
+topics, _ = topic_model.fit_transform(docs, embeddings)
+```
+
+The BERTopic FAQ attributes run-to-run differences to "the stochastic nature of UMAP" and gives this
+`random_state` fix, noting it costs UMAP performance (a fixed seed disables its parallelism). Without it,
+a re-fit on unchanged data can split or merge themes and renumber them, which the volume dashboard reads
+as a spike in one topic and a collapse in another. The seed makes a re-fit on the same data repeatable;
+the monthly re-fit on new data still needs the top-word-overlap alignment described in Phase 4.

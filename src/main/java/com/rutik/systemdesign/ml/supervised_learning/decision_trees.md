@@ -692,6 +692,27 @@ A team tuned max_depth=6 on their credit dataset and reused the same parameter f
 **Pitfall 6 — Not pruning after achieving high training accuracy**
 Post-pruning (ccp_alpha) is more principled than pre-pruning with max_depth but is rarely used in practice because it is less intuitive. A team that spent hours tuning max_depth would have achieved better results in less time by growing a full tree and then calling cost_complexity_pruning_path + cross-validation to find the optimal alpha. Use pruning when interpretability of the final tree is important — the pruned tree is guaranteed to be smaller than a max_depth-limited tree at the same accuracy.
 
+**Pitfall 1 as code: a tree grown until every leaf is pure.**
+
+```python
+# BROKEN: defaults -- max_depth=None, min_samples_leaf=1; training accuracy 1.00
+from sklearn.tree import DecisionTreeClassifier
+
+tree = DecisionTreeClassifier(random_state=0).fit(X_tr, y_tr)
+```
+
+```python
+# FIX: choose the cost-complexity pruning strength by cross-validation
+from sklearn.model_selection import GridSearchCV
+
+path = DecisionTreeClassifier(random_state=0).cost_complexity_pruning_path(X_tr, y_tr)
+search = GridSearchCV(DecisionTreeClassifier(random_state=0),
+                      {"ccp_alpha": path.ccp_alphas[:-1]}, cv=5, scoring="roc_auc")
+tree = search.fit(X_tr, y_tr).best_estimator_
+```
+
+An unconstrained tree memorises the training set, including its noise, and the 1.00 training accuracy looks like success until the test score arrives. `cost_complexity_pruning_path` lists every alpha at which a subtree is pruned, so the search only tries values that change the tree. The last alpha prunes to the root, which is why it is dropped.
+
 ---
 
 ## 11. Technologies & Tools
@@ -874,3 +895,30 @@ Rule 3: tenure_months > 60 AND contract_type!=month-to-month
 **Business Outcome**: the CRM team entered the 18 rules directly into Salesforce. No model serving infrastructure was needed. Targeted retention calls to Rule 1 and Rule 2 customers over a 90-day pilot reduced churn in those segments by 23%. The total cost of the initiative: 2 weeks of data science time, zero infrastructure cost.
 
 **Lesson**: a well-tuned, pruned decision tree (AUC 0.83) with directly extractable rules delivered more business value than a gradient boosting model (AUC 0.91) would have, because the CRM team could not consume a black-box model. The constraint on interpretability made the simpler model the correct engineering choice.
+
+**BROKEN → FIX: quoting a balanced tree's leaf probabilities as churn rates.** The rules above carry a "churn probability" per leaf, and the tree was trained with `class_weight="balanced"`.
+
+```python
+# BROKEN: predict_proba of a class-weighted tree, exported as "churn probability"
+leaf_churn_prob = tree.predict_proba(X_train)[:, 1]
+# "balanced" multiplies each churner's weight by n / (2 * n_churners); with a 15% churn rate that is
+# 3.33 for churners and 0.59 for stayers, so a leaf where 40% of customers actually churn reports
+# 0.4*3.33 / (0.4*3.33 + 0.6*0.59) = 0.79
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+# FIX: keep the weighted tree for its splits, but report each leaf's UNWEIGHTED churn rate and size
+leaf_id = tree.apply(X_train)
+leaf_stats = (pd.DataFrame({"leaf": leaf_id, "churned": np.asarray(y_train)})
+              .groupby("leaf")["churned"]
+              .agg(n="size", churn_rate="mean"))
+# export each rule with leaf_stats.loc[leaf, "churn_rate"] and leaf_stats.loc[leaf, "n"]
+```
+
+The weighting is a training device to stop the tree ignoring the minority class; it is not a statement
+about how often customers in a leaf churn. Sending a weighted 0.79 to the CRM team inflates the expected
+saves from every retention call and over-spends the offer budget. Recompute the rates on the temporal test
+set as well: the training-set rate of a leaf the tree chose to create is optimistic.

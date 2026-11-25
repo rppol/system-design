@@ -857,8 +857,8 @@ If 98% of email is ham, a model that always predicts "ham" scores 98% accuracy w
 
 Data leakage is when information from the test set influences training — most commonly fitting the TF-IDF vectorizer on the full corpus before splitting, which leaks test-set IDF statistics and vocabulary. It inflates offline metrics that then collapse in production. Prevent it by splitting first and fitting the vectorizer on the training fold only, ideally by putting it inside a `Pipeline` so cross-validation re-fits it per fold.
 
-**Q: How do you handle class imbalance in text classification?**
-**Short:** Handle text class imbalance by escalating from class weights to threshold moving, resampling, then focal loss.
+**Q: In what order should you try fixes for a heavily imbalanced text classifier?**
+**Short:** Escalate from cheapest to costliest: class weights, then a validation-tuned threshold, then resampling, then focal loss for neural models.
 
 Start with the cheapest lever and escalate: class weights, then threshold moving, then resampling, then focal loss. Concretely that is `class_weight="balanced"`, then a validation-tuned decision threshold, then oversampling, then focal loss for neural models, and `ComplementNB` in place of `MultinomialNB` for imbalanced text. Threshold moving is often the highest-leverage step because it directly targets the precision/recall operating point without retraining. Always tune the threshold on validation data, never on the test set.
 
@@ -1011,3 +1011,41 @@ The cascade recovers 83% of the achievable accuracy gain for 15% of the GPU spen
 - The linear baseline shipped first and still handles 85% of traffic — the cascade exists because a plain linear model was measured, not assumed inadequate.
 - Per-class abstention thresholds, tuned on validation, turned an accuracy problem into a precision-with-coverage problem the business could reason about.
 - BERT was adopted only for the ambiguous minority where its context modeling demonstrably helped, keeping the accuracy gain while avoiding 6× the serving bill.
+
+**BROKEN → FIX: one global abstention cut-off for six queues.** Phase 2's per-class thresholds exist because a single threshold cannot hold precision >= 0.90 on every queue.
+
+```python
+import numpy as np
+
+
+# BROKEN: one cut-off on the top calibrated probability for every class
+def route_broken(proba: np.ndarray, threshold: float = 0.6) -> np.ndarray:
+    top = proba.argmax(axis=1)
+    return np.where(proba.max(axis=1) >= threshold, top, -1)   # -1 = human triage
+# frequent, well-separated classes (How-To) clear 0.90 precision at a low cut-off;
+# the 3% Other class needs a much higher one, so any single value fails one side
+```
+
+```python
+# FIX: per class, the LOWEST threshold that keeps validation precision >= target
+def fit_class_thresholds(proba_val: np.ndarray, y_val: np.ndarray,
+                         target_precision: float = 0.90) -> np.ndarray:
+    top = proba_val.argmax(axis=1)
+    conf = proba_val.max(axis=1)
+    thresholds = np.full(proba_val.shape[1], np.inf)            # inf = never auto-route this class
+    for c in range(proba_val.shape[1]):
+        is_c = top == c
+        for t in np.unique(conf[is_c]):                         # ascending candidate thresholds
+            kept = is_c & (conf >= t)
+            if (y_val[kept] == c).mean() >= target_precision:
+                thresholds[c] = t                               # lowest = most tickets auto-routed
+                break
+    return thresholds
+
+
+def route(proba: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+    top = proba.argmax(axis=1)
+    return np.where(proba.max(axis=1) >= thresholds[top], top, -1)
+```
+
+The search keeps the lowest qualifying threshold because that maximises coverage, the share of tickets routed without a human, under the precision constraint; a class that never reaches 0.90 gets `inf` and always goes to triage, which is the honest answer. Fit the thresholds on validation and confirm them on test: precision near the threshold is noisy for the 3% class, and a threshold chosen on the same rows it is reported on overstates it.

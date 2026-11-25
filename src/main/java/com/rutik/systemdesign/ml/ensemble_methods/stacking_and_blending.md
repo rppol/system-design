@@ -1195,3 +1195,30 @@ Read the four coefficients as a ranking that the data produced rather than one y
 ```
 
 The weights sum to exactly `1.00`, which is what keeps the blend on the LTV scale rather than inflating it. Across all 30K rows the same arithmetic moves RMSE from `48.3` to `45.7` — a `2.6`-point, `5.38%` reduction — bought with `5 x 4 = 20` fold-fits. Equal weighting would have let ET (RMSE `52.0`) drag the blend as hard as LGB (RMSE `48.3`) pulled it, which is precisely the failure the single row above shows in miniature.
+
+**BROKEN → FIX: training the meta-learner on in-sample predictions.** The OOF loop above exists to prevent this exact shortcut.
+
+```python
+import numpy as np
+from sklearn.linear_model import Ridge
+
+# BROKEN: meta-features from base models that have already seen every training row
+in_sample = np.column_stack([m.fit(X_train, y_train).predict(X_train) for m in base_models.values()])
+meta = Ridge(alpha=50.0).fit(in_sample, y_train)
+# ExtraTreesRegressor defaults to bootstrap=False with fully grown trees, so on training rows it
+# reproduces y almost exactly; Ridge sees a near-perfect column and hands ET most of the weight,
+# the reverse of the 0.05 it earns on OOF predictions
+```
+
+```python
+from sklearn.model_selection import cross_val_score
+
+# FIX: fit the meta-learner on the OOF matrix, and score IT with its own CV
+meta = Ridge(alpha=50.0)
+meta_cv_rmse = -cross_val_score(meta, oof_predictions, y_train, cv=kf,
+                                scoring="neg_root_mean_squared_error").mean()
+meta.fit(oof_predictions, y_train)
+final_test = meta.predict(test_predictions)
+```
+
+In-sample predictions measure how well each base model memorised the training set, so the meta-learner learns to trust the most overfit model; on the test set that model is the weakest, and the stack can come out worse than LightGBM alone. Cross-validating the meta-learner on the OOF matrix also removes the small optimism in the "Ensemble OOF RMSE" above, which fits and scores Ridge on the same 30,000 rows.

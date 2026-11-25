@@ -985,3 +985,41 @@ model = RNNLanguageModel(
 - **Personalization dominates perceived quality.** The on-device personal cache contributed more to user-visible improvement than any smoothing choice, because it captures names and jargon absent from the shared corpus.
 - **Perplexity vs product metric.** Offline word-level perplexity dropped from ~140 (Kneser-Ney 4-gram) to ~95 (fused with the LSTM), but the metric the team actually optimized was **keystroke savings** — the fraction of characters the user did not have to type. The two correlated but not perfectly, reinforcing the intrinsic-vs-extrinsic lesson from §12.
 - **Privacy via federated learning.** Federated averaging with per-round gradient clipping and Gaussian noise let the shared LM improve week over week with no raw text collection, at the cost of slower convergence than centralized training would give.
+
+**BROKEN → FIX: averaging per-batch perplexities.** The ~140 → ~95 comparison above is only valid if both numbers are computed the same, correct way.
+
+```python
+import math
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import DataLoader
+
+
+# BROKEN: mean of per-batch perplexities, padding counted as tokens
+@torch.no_grad()
+def perplexity_broken(model: nn.Module, loader: DataLoader) -> float:
+    ppls = []
+    for x, y in loader:
+        logits = model(x)                                         # (B, T, V)
+        loss = F.cross_entropy(logits.flatten(0, 1), y.flatten())  # pad targets included
+        ppls.append(math.exp(loss.item()))
+    return sum(ppls) / len(ppls)
+```
+
+```python
+# FIX: exp of the total NLL over the total number of REAL target tokens
+@torch.no_grad()
+def corpus_perplexity(model: nn.Module, loader: DataLoader, pad_id: int) -> float:
+    model.eval()                                                  # dropout off
+    total_nll, total_tokens = 0.0, 0
+    for x, y in loader:
+        logits = model(x)
+        total_nll += F.cross_entropy(logits.flatten(0, 1), y.flatten(),
+                                     ignore_index=pad_id, reduction="sum").item()
+        total_tokens += int((y != pad_id).sum())
+    return math.exp(total_nll / total_tokens)
+```
+
+Two errors compound in the broken version. Padding targets are easy to predict, so they pull the loss down and flatter the model with short sentences; and because `exp` is convex, the mean of per-batch `exp(loss)` is at least `exp` of the mean loss, with a short final batch weighted as heavily as a full one. The n-gram and the LSTM must also share one tokenization and vocabulary, with out-of-vocabulary handling stated, or their perplexities measure different things.

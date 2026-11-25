@@ -179,6 +179,7 @@ The `mlops/` section owns the cross-artifact lifecycle for classic and generativ
 - All code in Python with type hints (3.10+ style)
 - Use numpy, sklearn, PyTorch, or relevant library — no pseudocode
 - Minimum 15 Q&As per module and per sub-file (hard floor; matches root `CLAUDE.md`). Order by interview frequency: gotchas/traps first, then internals, then edge cases
+- At least one `BROKEN → FIX` code pair in §14 of every module page and sub-file: a fence marked `# BROKEN`, then a fence marked `# FIX`, then one paragraph on what changed and why it was silent. Add one to §10 as well wherever a pitfall is a code defect. Measured 2026-11-25: all 89 module pages and sub-files carry a §14 pair (37 were added that day) and a §10 pair (36 were added that day; `classical_ml_vs_llm.md` already had one).
 
 ## Adding a New ML Module
 

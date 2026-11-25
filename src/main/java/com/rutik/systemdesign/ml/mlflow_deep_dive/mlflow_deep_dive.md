@@ -10,13 +10,17 @@ you ran, what came out, and which one is live. Databricks built it and open-sour
 most Python ML shops, and it positions itself as "The Open Source AI Engineering Platform"
 because MLflow 3 extended the same record-keeping to GenAI traces, prompts and judges.
 
-**This module targets MLflow 3.15.1**, released 2026-08-03 (3.15.0 landed 2026-07-31). Every
-default, constant and file layout quoted below was read out of that package, not from
-documentation. Where a behaviour changed at a known version the tag is inline —
+**This module targets MLflow 3.18.0**, released 2026-11-04. Every
+default, constant and file layout quoted below was read out of an installed 3.15.1 package
+(2026-08-03), not from documentation, and the 3.16, 3.17 and 3.18 release notes were then read
+for changes to it. Where a behaviour changed at a known version the tag is inline —
 `[MLflow 3.0+]`, `[2.9+]`, `[2.10+]`. Since 3.15.1: 3.16.0 (2026-09-03) made basic-auth
 return 403 on any route with no authorization rule, made Traces V4 the default traces UI and deprecated the experiment Sessions tab;
 3.17.0 (2026-10-06) added run, trace and version permissions and a schema migration that needs
-every writer stopped (see the upgrade note in §6).
+every writer stopped (see the upgrade note in §6); 3.18.0 (2026-11-04) stopped adding
+`registered_model_meta` to `models:/` downloads, made `search_logged_models` filter and sort
+metrics by the highest step on SQL stores, added `MLFLOW_ALLOW_MODEL_CODE_EXECUTION=false` to
+refuse model-supplied code, and deprecated `MLFLOW_ALLOW_PICKLE_DESERIALIZATION`.
 
 The thesis of this page, and the sentence to carry into an interview:
 
@@ -771,7 +775,7 @@ with mlflow.start_run():
         name="fraud",
         python_model=Fraud(),
         artifacts={"weights": "local/model.joblib"},
-        pip_requirements=["scikit-learn==1.9.0", "joblib==1.5.2"],
+        pip_requirements=["scikit-learn==1.9.1", "joblib==1.5.2"],
     )
 ```
 
@@ -840,7 +844,7 @@ skops==0.14.0
 **MLflow pins what it saw, not what you meant.** The honest list of what is outside the model:
 
 - the CUDA driver and toolkit, cuDNN, NCCL — a torch model's `requirements.txt` names
-  `torch==2.10.0` and says nothing about the driver that wheel needs
+  `torch==2.15.0` and says nothing about the driver that wheel needs
 - system shared libraries: glibc, OpenSSL, `libgomp`, MKL, the BLAS your numpy linked against
 - the base image, the OS, and the CPU instruction set the wheels were built for
 - environment variables that changed behaviour (`OMP_NUM_THREADS`, `TOKENIZERS_PARALLELISM`)
@@ -854,7 +858,7 @@ Override the inference when you know better:
 ```python
 mlflow.sklearn.log_model(
     model, name="model",
-    pip_requirements=["scikit-learn==1.9.0", "numpy==2.5.1"],   # replace inference entirely
+    pip_requirements=["scikit-learn==1.9.1", "numpy==2.5.1"],   # replace inference entirely
     # or: extra_pip_requirements=["boto3>=1.40"]                # add to what was inferred
 )
 ```
@@ -1514,11 +1518,34 @@ own `requirements.txt`. Pin the image digest alongside the model version, valida
 `mlflow.models.predict()` `[2.10+]` in the declared environment before promoting, and prefer
 `python_env.yaml` with `uv` over `conda.yaml` for reproducibility on a patch-version boundary.
 
+**Pitfall 7 as code: rebuilding a model URI from the run's artifact tree.**
+
+```python
+# BROKEN: MLflow 3 stores models as LoggedModels, not under the run's artifacts
+from mlflow import MlflowClient
+
+client = MlflowClient()
+paths = [a.path for a in client.list_artifacts(run_id)]
+uri = f"runs:/{run_id}/model" if "model" in paths else None     # always None for new runs
+```
+
+```python
+# FIX: keep the URI that log_model returns, and deploy through a registry alias
+import mlflow
+
+info = mlflow.sklearn.log_model(model, name="model")
+train_uri = info.model_uri                       # models:/<model_id>, the LoggedModel
+deploy_uri = "models:/fraud@champion"            # resolved by alias at deploy time
+loaded = mlflow.pyfunc.load_model(deploy_uri)
+```
+
+The broken script worked for years on MLflow 2 and failed closed after the upgrade, which was the lucky outcome; a variant that fell back to a default path would have deployed the wrong model. URIs built by string concatenation encode a storage layout that MLflow does not promise to keep. The returned `model_uri` and registry aliases are the stable interfaces.
+
 ---
 
 ## 11. Technologies & Tools
 
-- **MLflow** — the platform itself. Version 3.15.1, released 2026-08-03, Apache-2.0, created by Databricks in 2018. Records, packages and labels; never executes.
+- **MLflow** — the platform itself. Version 3.18.0, released 2026-11-04, Apache-2.0, created by Databricks in 2018. Records, packages and labels; never executes.
 - **MLflow Tracking** — runs, params, metrics, tags, datasets and artifacts, over a SQL backend store plus an object artifact store.
 - **MLflow Models** — the `MLmodel` directory format: flavours, signature, and three renderings of the dependency set. The reason the ecosystem interoperates.
 - **MLflow Model Registry** — named models with numbered versions, movable aliases and version tags. Stages deprecated in 2.9.0.
@@ -1544,7 +1571,7 @@ own `requirements.txt`. Pin the image digest alongside the model version, valida
 ## 12. Interview Questions with Answers
 
 **Q: Does MLflow run your training or your inference?**
-**Short:** No. MLflow records runs, packages models and labels which version is live; every piece of compute belongs to you or another system.
+**Short:** No, MLflow records runs, packages models and labels the live version, while every piece of compute belongs to you or another system.
 Neither. MLflow is a recording and packaging layer: Tracking writes what happened to a database and a bucket, Models describes what came out in a loader-agnostic directory, and the Registry says which version is live. There is no scheduler, no resource manager and no GPU awareness anywhere in it. The one exception people cite is `mlflow models serve`, which does run a model — in a single Python process with no batching scheduler and no concurrency control, which is why it is a smoke test rather than a serving tier. The practical consequence is that an MLflow outage stops you logging, not training, and that MLflow sits happily under Airflow, Ray, Kubeflow or a plain Kubernetes Job without competing with any of them.
 
 **Q: A CI job logs params and metrics successfully but fails on `log_artifact` with a 403. What is wrong?**
@@ -1552,7 +1579,7 @@ Neither. MLflow is a recording and packaging layer: Tracking writes what happene
 MLflow uses two stores reached by different credentials. Params and metrics travel over REST to the tracking server, which writes them to the database using the server's credentials. Artifacts, in direct mode, are written by the *client* straight to S3 or GCS using ambient cloud credentials the client must hold. A CI runner with `MLFLOW_TRACKING_URI` and no `AWS_*` role therefore succeeds at half the run and 403s on the first artifact, leaving the run in `RUNNING` because the exception escaped the context manager. Check the mode with `mlflow.get_experiment_by_name(...).artifact_location`: an `mlflow-artifacts:/` root is proxied and needs nothing from the client, an `s3://` root is direct. Fix by switching the experiment to proxied artifacts or granting the runner `s3:PutObject` on the prefix.
 
 **Q: What does `mlflow.pytorch.autolog()` log from a hand-written PyTorch training loop?**
-**Short:** Nothing at all. That autologger patches PyTorch Lightning's Trainer.fit only, and it fails silently, producing an empty run with no warning.
+**Short:** Nothing at all, because that autologger patches only PyTorch Lightning's Trainer.fit and fails silently with an empty run and no warning.
 Absolutely nothing, and there is no error. `mlflow.pytorch.autolog()` monkey-patches PyTorch Lightning's `Trainer.fit`; a `for batch in loader:` loop is never intercepted. Autologging is also best-effort by design — exceptions inside the patched path are swallowed so they cannot break training — so an empty autologged run looks exactly like a successful one. Teams discover it weeks later when they try to compare experiments and find no metric history. If your loop is hand-written, log explicitly. Guard against it in CI with a post-run assertion that the run carries the metric keys you expect, and remember the second-order damage: a run with no metrics also looks like a run with nothing worth auditing.
 
 **Q: What breaks if you log a model without a signature?**
@@ -1656,7 +1683,7 @@ Tracing records one trace per request with spans for retrieval, tool calls and m
 The AI Gateway is configured with an `endpoints` list, each naming a provider, a model and an `endpoint_type` such as `llm/v1/chat` or `llm/v1/embeddings`, with API keys resolved server-side so application code never holds them. It buys provider-agnostic request shapes, central key rotation and one place to attach rate limits and cost accounting. It is served by the tracking server: the standalone MLflow 2 deployment-server app and `mlflow deployments start-server` were **removed in MLflow 3**, and the config keys `routes` and `route_type` became `endpoints` and `endpoint_type`. What it does not give you is the routing intelligence of a dedicated LLM gateway — no semantic cache, no fallback chains, no per-tenant budgets — so choose it when you already run MLflow and want to stop scattering keys, not when gateway behaviour is the product.
 
 **Q: Are MLflow Projects worth adopting in 2026?**
-**Short:** No. Projects solved reproducible execution before containers were easy; today an image plus a real orchestrator beats it on every axis, and its successor Recipes was removed in MLflow 3.
+**Short:** No, a container image plus a real orchestrator now beats MLflow Projects on every axis, and its successor Recipes was removed in MLflow 3.
 No, and the evidence is that MLflow moved on too. An `MLproject` declares entry points, parameters and an environment, and `mlflow run` shells out to your command with environment variables set. That is the entire feature. It solved a real 2018 problem — containerising a Python ML job was hard — but today the environment problem is an image and the execution problem is Airflow, Argo, Kubeflow Pipelines, Ray Jobs or a Kubernetes Job, each of which has retries, scheduling, resource requests, secrets and observability that Projects never had. **Recipes**, the successor abstraction, was **removed in MLflow 3**. What survives is the useful half: set `MLFLOW_RUN_ID` and `MLFLOW_EXPERIMENT_ID` in your job's environment so the job logs into a run the orchestrator created.
 
 **Q: How do you do authentication and multi-tenancy on open-source MLflow?**

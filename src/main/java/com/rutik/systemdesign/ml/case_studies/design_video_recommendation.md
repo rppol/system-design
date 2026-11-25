@@ -1,4 +1,7 @@
 # Design a Video Recommendation System (YouTube "Watch Next")
+
+## Intuition
+
 > "A video recommender is a TV channel that reprograms itself for every viewer between one video ending and the next one starting — and it is graded not on whether you press play, but on whether you are still watching an hour later."
 
 **Key insight:** The defining decision in video recommendation is the *objective*, not the architecture. If you optimize click-through rate you get clickbait — thumbnails and titles that win the click and lose the hour. YouTube's answer (Covington et al., 2016) is a ranking model trained as **weighted logistic regression** where each positive impression is weighted by its watch time, so the learned odds approximate *expected watch time per impression* rather than P(click). The 2019 successor (Zhao et al.) generalizes this by adopting **multi-gate mixture-of-experts (MMoE**, introduced by Ma et al., KDD 2018**)** to jointly predict many engagement and satisfaction signals, with a shallow tower that removes position/selection bias. Everything else — two-tower candidate generation, ANN retrieval, feature stores — is shared with any large recommender; the watch-time objective and the multitask ranking head are what make this problem *video*.
@@ -10,6 +13,19 @@ Why this system exists: YouTube's then-chief product officer Neal Mohan said at 
 This study is deliberately **distinct** from two neighbors you should cross-read:
 - [Content Feed Ranking](design_content_feed_ranking.md) — multi-objective *feed* ranking (a scrollable timeline; the unit is a post, engagement is like/comment/share). Video-rec here centers watch-time regression and sequential "what to watch next".
 - [Real-Time Personalization](design_real_time_personalization.md) — the two-stream (historical + session) freshness architecture and GRU session encoder. Video-rec reuses that serving skeleton but focuses on the *objective design and multitask ranking head*.
+
+Three shared primitives carry most of the risk in this design, and each has its own cross-cutting reference: the point-in-time label join ([Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md)), the calibration of the watch-time head that score fusion depends on ([Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md)), and the daily retrain with its drift gates ([Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md)).
+
+**Vocabulary used throughout:**
+
+| Term | Meaning in this study |
+|---|---|
+| Impression | One video shown in one slot of one response; the unit the ranker scores |
+| Watch-time weight | The sample weight on a positive impression, equal to its (clipped) watch seconds (§4.2) |
+| Label maturation | The wait until an impression's watch-time label is final; long videos mature hours later (§4.7) |
+| logQ correction | Subtracting log(sampling probability) from a candidate's logit so popular in-batch negatives are not over-penalized (§4.6) |
+| Recall@K | Fraction of eventually-watched videos present in the K retrieved candidates; caps the whole system |
+| Fresh pool | The separate candidate source for uploads under 24h that bypasses the slow ANN rebuild (§4.4) |
 
 ---
 
@@ -485,6 +501,137 @@ def mmr_rerank(candidates, scores, embeddings, k=20, lam=0.7):
     return [candidates[i] for i in selected]
 ```
 
+### 4.6 Sampling-bias correction for in-batch negatives (logQ)
+
+§4.1 trains the retriever with sampled negatives and notes that the popularity correction was left out. That omission is not cosmetic. Production two-tower retrievers usually take their negatives from the **other positives in the same batch** (in-batch softmax), because those embeddings are already computed. But a batch is sampled from the engagement stream, so a video watched 10^6 times a day turns up as somebody else's negative about 10^6 times as often as a niche video. The loss then pushes popular videos away from every user vector, and the retriever learns "unpopular is relevant". Yi et al. (RecSys 2019, the YouTube Neural Deep Retrieval system over tens of millions of videos) fix it by subtracting `log p_j`, the probability that video `j` appears in a batch, from each candidate logit, and they estimate `p_j` from the stream itself, with no fixed vocabulary, so a video uploaded an hour ago gets an estimate too.
+
+```python
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+
+class StreamingFrequencyEstimator:
+    """
+    Yi et al. 2019: estimate how often each item appears in a training batch
+    without a fixed vocabulary. For each hash bucket h:
+      A[h] = the step at which the item was last seen
+      B[h] = moving average of the gap (in steps) between two sightings
+    The per-batch sampling probability is then about 1 / B[h].
+    The paper uses several hash arrays to limit collisions; one is shown here.
+    """
+
+    def __init__(self, num_buckets: int = 2**22, alpha: float = 0.01,
+                 init_gap: float = 1_000.0) -> None:
+        self.num_buckets = num_buckets
+        self.alpha = alpha
+        self.A = torch.zeros(num_buckets, dtype=torch.float64)
+        self.B = torch.full((num_buckets,), init_gap, dtype=torch.float64)
+
+    def update(self, item_ids: torch.Tensor, step: int) -> None:
+        h = torch.unique(item_ids) % self.num_buckets
+        self.B[h] = (1 - self.alpha) * self.B[h] + self.alpha * (step - self.A[h])
+        self.A[h] = float(step)
+
+    def probability(self, item_ids: torch.Tensor) -> torch.Tensor:
+        return 1.0 / self.B[item_ids % self.num_buckets].clamp(min=1.0)
+
+
+def in_batch_softmax_loss(user_vecs: torch.Tensor, video_vecs: torch.Tensor,
+                          video_ids: torch.Tensor, est: StreamingFrequencyEstimator,
+                          temperature: float = 0.05, corrected: bool = True) -> torch.Tensor:
+    """Row i's positive is column i; every other column is a negative."""
+    logits = user_vecs @ video_vecs.T / temperature                  # (B, B)
+    if corrected:
+        # FIX: s_c(x_i, y_j) = s(x_i, y_j) - log p_j, applied per candidate column
+        log_p = torch.log(est.probability(video_ids)).to(logits.dtype)
+        logits = logits - log_p.unsqueeze(0)
+    # BROKEN when corrected=False: popular videos are punished once per batch
+    # they appear in, so the retriever under-retrieves the head of the catalog.
+    same_video = video_ids.unsqueeze(0) == video_ids.unsqueeze(1)
+    diagonal = torch.eye(len(video_ids), dtype=torch.bool)
+    logits = logits.masked_fill(same_video & ~diagonal, float("-inf"))  # duplicate = not a negative
+    return F.cross_entropy(logits, torch.arange(len(video_ids)))
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    n_items, batch = 1_000, 256
+    ranks = torch.arange(1, n_items + 1, dtype=torch.float64)
+    true_p = (1 / ranks) / (1 / ranks).sum()                         # Zipf(1) popularity
+    est = StreamingFrequencyEstimator(num_buckets=4_096, alpha=0.05, init_gap=100.0)
+    for step in range(1, 2_001):
+        est.update(torch.multinomial(true_p, batch, replacement=True), step)
+    for item in (0, 99, 999):
+        expected = 1 - (1 - float(true_p[item])) ** batch            # P(item in a batch)
+        got = float(est.probability(torch.tensor([item]))[0])
+        print(f"item {item:4d}: P(in batch) expected {expected:.3f}, estimated {got:.3f}")
+
+    u = F.normalize(torch.randn(batch, 64), dim=-1)
+    v = F.normalize(torch.randn(batch, 64), dim=-1)
+    ids = torch.multinomial(true_p, batch, replacement=True)
+    print("loss uncorrected", float(in_batch_softmax_loss(u, v, ids, est, corrected=False)))
+    print("loss corrected  ", float(in_batch_softmax_loss(u, v, ids, est, corrected=True)))
+```
+
+Two details decide whether this works in production. First, the duplicate mask: under Zipf popularity the top video appears dozens of times in a 256-row batch, and without the mask each copy is a "negative" for the others, which is a contradiction the model cannot fit. Second, `alpha` sets how fast the estimator follows a trend: at `alpha = 0.01` the moving average forgets with a time constant of about 100 steps, so a video that goes viral is re-estimated within a few hundred training steps instead of at the next daily vocabulary rebuild. Measure the result as retrieval recall@500 split by popularity decile; an uncorrected model loses recall in the top decile, a corrected one should be flat.
+
+### 4.7 Label maturation: when is a watch-time label final?
+
+The §4.2 objective needs the watch seconds of every clicked impression. That number is not known when the impression is logged; it grows until the viewer stops. A streaming job must decide **when to emit the training example**, and the obvious choice, a fixed cutoff after the impression, silently biases the ranker against long videos.
+
+```python
+from __future__ import annotations
+
+import numpy as np
+
+
+def simulate(n: int = 200_000, seed: int = 7) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    duration = rng.lognormal(mean=np.log(480.0), sigma=1.0, size=n)  # median 8 min
+    watch = duration * rng.beta(2.0, 3.0, size=n)                    # mean 40% watched
+    start_delay = rng.exponential(30.0, size=n)                      # s from impression to play
+    return duration, watch, start_delay
+
+
+# BROKEN: emit every label 10 minutes after the impression. Any watch still in
+# progress is truncated, and truncation grows with video length.
+def label_fixed_cutoff(watch: np.ndarray, start_delay: np.ndarray,
+                       cutoff_s: float = 600.0) -> np.ndarray:
+    return np.clip(np.minimum(watch, cutoff_s - start_delay), 0.0, None)
+
+
+# FIX: a per-impression maturation deadline scaled by the video's duration,
+# capped so a 10-hour stream cannot hold join state forever. A session-end
+# event, when the client sends one, closes the label earlier.
+def maturation_deadline(duration: np.ndarray, start_delay: np.ndarray,
+                        slack: float = 1.5, pad_s: float = 300.0,
+                        cap_s: float = 6 * 3600.0) -> np.ndarray:
+    return np.minimum(start_delay + slack * duration + pad_s, cap_s)
+
+
+def label_matured(watch: np.ndarray, start_delay: np.ndarray,
+                  duration: np.ndarray) -> np.ndarray:
+    deadline = maturation_deadline(duration, start_delay)
+    return np.clip(np.minimum(watch, deadline - start_delay), 0.0, None)
+
+
+if __name__ == "__main__":
+    duration, watch, delay = simulate()
+    broken = label_fixed_cutoff(watch, delay)
+    fixed = label_matured(watch, delay, duration)
+    edges = [0, 300, 1200, 3600, np.inf]
+    names = ["<5 min", "5-20 min", "20-60 min", ">60 min"]
+    for lo, hi, name in zip(edges[:-1], edges[1:], names):
+        m = (duration >= lo) & (duration < hi)
+        print(f"{name:>9}: true {watch[m].mean():7.0f}s  "
+              f"fixed-cutoff {broken[m].mean():7.0f}s ({broken[m].mean() / watch[m].mean():.0%})  "
+              f"matured {fixed[m].mean():7.0f}s")
+```
+
+Under the fixed cutoff, videos under 5 minutes keep essentially all their watch time, while videos over 60 minutes (true mean watch of at least 24 minutes at a 40% completion rate) are capped below 10 minutes, so they lose more than half of their label. The weighted-logistic ranker then learns that long videos are worth less than they are, and the share of long-form content falls retrain after retrain. The matured label fixes the bias at a price: the join must hold clicked impressions in state for up to the 6-hour cap, which sets the Flink state size in §10, and the freshest training examples for long videos arrive hours late. The point-in-time rule from [Feature Store and Point-in-Time Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) still applies to the *features*: they are read as of the impression, even though the *label* is read as of the deadline.
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -512,6 +659,15 @@ The shallow-tower ("bias tower") approach learns the position effect jointly and
 **Decision 5: How fresh to retrain.**
 Engagement distributions shift on a daily/weekly cycle and around events. Daily retrain of the ranker plus streaming freshness counters is the standard. Fully online learning is possible but adds instability; most systems do daily batch retrain + real-time features rather than true online gradient updates.
 
+**Decision 6: Wait for mature labels vs train on provisional ones.**
+§4.7's matured label is unbiased but late: a long video's example arrives up to 6 hours after the impression. The alternative is to emit a provisional label at a short cutoff and a correction later (a second example with the residual watch time), which keeps the freshest signal but doubles the event volume and makes every training example's weight depend on when it was read. Use matured labels for the daily-retrained ranker, where 6 hours of lag is immaterial against a 24-hour cycle; use provisional labels only for streaming freshness *features* such as watch-time velocity, which tolerate truncation because they are compared against themselves.
+
+| Choice | Label bias | Label lag | Join state |
+|---|---|---|---|
+| Fixed 10-min cutoff | Biased against long videos (§4.7) | 10 min | clicks/s x 600 s |
+| Duration-scaled deadline, 6 h cap | None below the cap | ~25 min mean, 6 h max | clicks/s x ~1,500 s mean (§10) |
+| Provisional + correction events | None after correction | 10 min first, final later | same as matured, plus 2x events |
+
 ---
 
 ## 6. Real-World Implementations
@@ -525,6 +681,20 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 **Netflix.** Ranks rows/titles rather than a next-video stream, but shares the two-stage retrieval+ranking and the "optimize long-term member value, not immediate clicks" philosophy. Netflix emphasizes calibrated ranking and diversity across the home page.
 
 **Spotify.** A discovery-vs-familiarity split rather than a session-vs-history one: Discover Weekly is 30 tracks of music you have *not* heard, while Daily Mix clusters your own listening history into several genre/mood mixes of mostly familiar artists. The interview-relevant transfer is that *context strongly matters for some media (music/short video) and weakly for others (long documentaries)* — the objective and freshness weighting should be tuned per surface.
+
+**YouTube retrieval (Yi et al., RecSys 2019 — "Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations").** The source for §4.6. The paper trains two-tower retrievers on in-batch negatives, shows that the batch loss carries a sampling bias that hurts most under a power-law item distribution, and estimates each item's sampling frequency from the training stream by gradient descent on a hashed sketch, so the estimate needs no fixed item vocabulary and adapts as popularity shifts. It deploys the result as Neural Deep Retrieval (NDR), retrieving from a corpus of tens of millions of videos, and reports offline gains on two datasets plus live A/B improvements on YouTube.
+
+**ByteDance (Liu et al., "Monolith: Real Time Recommendation System With Collisionless Embedding Table," ORSUM workshop at RecSys 2022).** The published counterpoint to Decision 5's "daily batch retrain". Monolith is built for **online training**: a collisionless embedding table (no two IDs share a hashed row) with expirable embeddings and frequency filtering to bound memory, and a production-ready online-training architecture with high fault tolerance. The paper argues that some system reliability can be traded for real-time learning, and names short-video ranking and online ads as the time-sensitive workloads that motivate it; the system shipped in the BytePlus Recommend product. The lesson for this design: online training is a real option when freshness is worth an engineering team, not a free upgrade.
+
+**Meta (Zhai et al., ICML 2024 — "Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations").** Reformulates retrieval and ranking as sequential transduction over a user's action history with the HSTU architecture. The authors report 1.5-trillion-parameter models that improved online A/B metrics by 12.4% and were deployed on multiple surfaces of a platform with billions of users, plus a 5.3x to 15.2x speedup over FlashAttention2-based Transformers at sequence length 8192. For an interview, it is the evidence that the "average the watch history" user tower of §4.1 is a floor, not a ceiling, once compute is available; [Generative Recommenders](../recommender_systems/generative_recommenders.md) covers the architecture.
+
+| Company | What this study borrows | Primary source |
+|---|---|---|
+| YouTube | Two-stage design, watch-time-weighted LR, example age (§4.1, §4.2, §4.4) | Covington et al., RecSys 2016 |
+| YouTube | MMoE ranker, shallow bias tower (§4.3, Decision 4) | Zhao et al., RecSys 2019 |
+| YouTube | logQ correction with streaming frequency estimation (§4.6) | Yi et al., RecSys 2019 |
+| ByteDance | Online training, collisionless embeddings (Decision 5) | Liu et al., ORSUM@RecSys 2022 |
+| Meta | Sequential generative recommenders at 1.5T parameters | Zhai et al., ICML 2024 |
 
 ---
 
@@ -560,6 +730,14 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 2. **Fresh content missing:** fresh-pool job or streaming counters stalled. Fall back to example-age boosting; restart Flink; check Kafka consumer lag.
 3. **ANN recall collapse:** stale/failed index build or quantization regression. Fall back to co-watch + subscriptions candidate sources; rebuild index.
 4. **Feedback loop / diversity collapse:** top-20 dominated by one topic. Verify MMR and per-cluster caps; check that the bias tower is being neutralized at serving.
+5. **Long-form share dropping retrain over retrain:** check the label-join deadline (§4.7) before touching the model. Compare mean label per duration bucket against the client's session-end events; a fixed cutoff shows as a ratio well under 1 in the >20 min buckets only.
+
+### Release gates for the daily retrain
+Every candidate ranker passes four gates before it takes traffic, in this order, and a failed gate blocks promotion automatically:
+- **Data gate:** row counts, label-maturation completeness (share of clicked impressions whose deadline has passed) and feature null rates against the trailing 7 days; the thresholds and the PSI checks follow [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md).
+- **Offline gate:** per-head AUC within 0.002 of the champion, and watch-time calibration (predicted / actual seconds per decile) inside 0.9 to 1.1. Score fusion multiplies heads, so a mis-calibrated head silently re-weights the whole ranking; the reliability-diagram method is in [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md).
+- **Exposure gate:** share of impressions to fresh uploads, to creators with under 1,000 subscribers, and to each top-level topic, compared with the champion on a replayed day. A drop over 20% relative blocks promotion; exposure concentration is a fairness property of the platform, see [Responsible AI, Fairness and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md).
+- **Online gate:** 1% canary for 24 hours on watch time, "not interested" rate and latency, then the A/B test in [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md).
 
 ---
 
@@ -576,6 +754,12 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 **Pitfall 5: Heavy-tail watch time destabilizing training.** A few multi-hour videos (live streams, lectures) produced enormous sample weights, and the weighted-logistic loss chased them, degrading everything else. Fix: clip/transform watch-time weights (e.g., cap at a high percentile, or use log-watch-time) before weighting. Watch the calibration curve, not just AUC.
 
 **Pitfall 6: Filter-bubble / satisfaction erosion.** Pure watch-time maximization surfaced compulsive content; short-term watch time rose but weekly retention fell as users felt worse about time spent. Fix: add explicit satisfaction signals (surveys, "not interested", likes) as MMoE heads and give dissatisfaction a strong negative weight; add exploration for topic diversity.
+
+**Pitfall 7: A 10-minute label cutoff that quietly shrank long-form.** (Illustrative composite; the mechanism is reproduced by the §4.7 simulation.) The label-join job emitted every example 10 minutes after the impression to keep Flink state small. Nothing failed; offline AUC even rose by 0.003 because truncated labels are easier to predict. Over 6 weekly releases the share of impressions going to videos over 20 minutes fell from 18% to 11%, and total watch time per user fell 2.4% because the long videos that were displaced carried the most minutes each. Detection took a creator-side complaint, not a model metric. Fix: duration-scaled deadline with a 6-hour cap, plus a release gate on impression share by duration bucket (§8). Cost of the fix: peak join state grew about 2.5x, from roughly 15 GB to roughly 39 GB before replication (§10). Lesson: a label pipeline can be biased without being broken, and only a per-segment metric sees it.
+
+**Pitfall 8: Turning on in-batch negatives without the logQ correction.** (Illustrative composite.) A retriever migration replaced sampled-softmax negatives (§4.1) with in-batch negatives to cut training cost by roughly 3x. Recall@500 on the evaluation set held steady overall, so it shipped. Split by popularity decile, recall in the top decile had dropped from 0.71 to 0.52 while the bottom deciles rose slightly: the head videos, which appear as negatives in almost every batch, had been pushed away from every user vector. Because head videos carry most watch time (see the McGrady et al. figure in §10), session watch time fell 1.1% in the A/B test before the cause was found. Fix: §4.6's correction plus a recall-by-decile dashboard. Lesson: an aggregate retrieval metric averages away exactly the bias this loss introduces.
+
+**Pitfall 9: A calibration drift that reordered the fusion.** (Illustrative composite.) The final score multiplies the watch-time head by a satisfaction penalty. After a feature-pipeline change, the watch-time head's predictions ran 30% high on mobile only while AUC was unchanged, because AUC ignores scale. Mobile rankings then over-weighted watch time against satisfaction and the "not interested" rate on mobile rose 9% in 3 days. Fix: per-segment calibration checks in the offline gate (§8), and isotonic recalibration of each head before fusion. Lesson: once heads are multiplied, each head's *scale* is part of the product, so measure it.
 
 ---
 
@@ -622,48 +806,102 @@ Streaming (freshness counters):
 
 **Scaling to a major live event (3–5× spike on a few videos):** the load concentrates on *few* videos, so ANN and ranking scale sub-linearly but the **feature store hot key** and **real-time counters** for those videos are the risk. Mitigation: in-process L1 cache for hot-video features, and shard the streaming counter for a viral video across sub-keys that are summed on read.
 
+**Label-join state (the §4.7 deadline sized with Little's law, L = λW):**
+
+```
+Clicked impressions (assumption): 20 impressions/response x 2% CTR = 0.4 clicks/request
+  peak  1M req/s   -> λ = 400k clicked impressions/s
+State per open label: ~64 B (impression id, video id, user id, timestamps, duration, running seconds)
+
+Fixed 10-min cutoff:   W = 600 s
+  L = 400k x 600 = 2.4e8 open labels x 64 B ≈ 15 GB
+Duration-scaled deadline (1.5 x duration + 300 s + play delay, 6 h cap):
+  durations lognormal, median 480 s, sigma 1 -> mean 480 x e^0.5 ≈ 790 s
+  W ≈ 1.5 x 790 + 300 + 30 ≈ 1,520 s (the 6 h cap almost never binds)
+  L = 400k x 1,520 ≈ 6.1e8 open labels x 64 B ≈ 39 GB
+With RocksDB state backend overhead and 2x replication, plan ~150 GB of
+state across the Flink job. The CAP controls the worst case; the MEAN
+duration controls the bill. A cap of 6 h on a 790 s mean costs almost nothing.
+```
+
+**Retriever training with the §4.6 estimator:** the hash arrays are 2 × 2^22 float64 values = 64 MB per hash function, replicated on every trainer. With 3 hash functions that is ~200 MB of host memory per trainer, negligible next to the 100M-row embedding table it corrects.
+
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: Why not just optimize click-through rate for video recommendation?**
+**Short:** Clicks and satisfaction diverge for video, so a CTR objective amplifies clickbait; weight positives by watch time so the ranker estimates expected watch time per impression instead.
 Because clicks and satisfaction diverge for video: a sensational thumbnail wins the click and loses the watch, so a CTR-optimized model amplifies clickbait. YouTube's fix is to train the ranker as watch-time-weighted logistic regression — positive impressions are weighted by watch time — so the serving score `exp(logit)` estimates expected watch time per impression rather than P(click). You rank by time-well-spent, not by the click. In practice add explicit satisfaction signals too, since even watch time can reward compulsive-but-regretted content.
 
 **Q: How does the watch-time-weighted logistic regression actually produce an expected-watch-time score?**
+**Short:** Weighting each clicked impression by its watch time makes the learned odds approximate total watch time over impressions, so exp(logit) is an expected-watch-time score.
 Weight each clicked (positive) impression by its watch time and each non-clicked impression by 1. The learned odds of the logistic model then approximate `sum(watch_time over positives) / (#negatives)`, which — because positives are rare relative to impressions — approximates the expected watch time per impression. So at serving you rank by `exp(Wx+b)` (the odds), not by the click probability `sigmoid(Wx+b)`. It is a regression on watch time obtained via a one-line change to sample weights.
 
 **Q: Why split into candidate generation and ranking instead of one model?**
+**Short:** A 500-feature ranker cannot score 100M videos in 200 ms, so cheap high-recall retrieval narrows to hundreds and an expensive ranker orders them; retrieval recall caps the system.
 You cannot run a 500-feature DNN over a 100M-video corpus within a 200 ms budget. Candidate generation is cheap and high-recall (millions → hundreds) using two-tower ANN; ranking is expensive and high-precision (hundreds → ~20) with many features per pair. The two stages have deliberately opposite cost/quality tradeoffs. The catch: retrieval recall caps the whole system — a video not retrieved can never be ranked — so recall@K is a first-class metric.
 
 **Q: What is MMoE and what problem does it solve here?**
+**Short:** Multi-gate Mixture-of-Experts gives each task its own gate over shared experts, reducing negative transfer between conflicting objectives such as watch time and dismissals.
 Multi-gate Mixture-of-Experts is a multitask trunk with several shared experts and a per-task gate that softmax-mixes those experts. It comes from Ma et al. (KDD 2018); Zhao et al. (RecSys 2019) adopted it for YouTube ranking with 4 or 8 experts sitting on a shared hidden layer. It lets each objective (watch time, like, "not interested") read a task-specific blend of experts, reducing negative transfer — the "seesaw" where improving one objective hurts another in a shared-bottom network. It matters for video because engagement and satisfaction objectives genuinely conflict, and you want to combine them without them fighting inside one shared representation.
 
 **Q: How do you correct for position/selection bias?**
+**Short:** Learn position in a shallow bias tower that is dropped at serving, or reweight examples by inverse propensity, so the main model stops crediting videos for their slot.
 Logged clicks are biased: high-position videos get clicked because they are visible, and training on that creates a feedback loop that re-promotes them. Two fixes: (1) a shallow "bias tower" fed only position/device whose output is added to the main model's final logit during training (with 10% position-feature dropout) and whose input is treated as missing at serving, so the served score is position-unbiased; (2) inverse propensity weighting, reweighting examples by `1/P(click|position)`. The shallow tower is simpler to serve and avoids high-variance propensity estimates; IPW is more principled with reliable position-CTR data.
 
 **Q: How do you recommend a video uploaded five minutes ago with no watch history?**
+**Short:** Warm-start its embedding from content and creator signals, retrieve it from a fresh-upload pool that bypasses the slow index rebuild, and let example age model freshness decay.
 Two mechanisms. Content warm-start: initialize the video's retrieval embedding from its category centroid, title/description text embedding, and the creator's average video embedding, so it is retrievable before any collaborative signal exists. And a dedicated fresh-upload candidate pool (uploads < 24h) that bypasses the slower full ANN index rebuild, meeting a ~5-minute freshness SLO. Covington's "example age" feature additionally lets the model learn the freshness-decay curve so fresh content is boosted appropriately.
 
 **Q: Why is recall@K the metric you watch for retrieval, and what happens if it is low?**
+**Short:** Recall@K says whether the eventually-watched video was retrieved at all; when it is low no ranker can surface the right video, so fix retrieval first.
 Recall@K measures whether the video the user eventually watched was among the K retrieved candidates. If it is low, the ranker is structurally incapable of surfacing the right video no matter how good it is — you are ranking the wrong shortlist. A classic failure mode is spending months improving the ranker while watch time stagnates because recall@500 is far below 100%. You fix retrieval first: better two-tower training, more/better candidate sources (co-watch graph, fresh pool, subscriptions).
 
 **Q: How do you prevent the recommender from collapsing into a filter bubble or a loop of near-identical videos?**
+**Short:** Stack MMR on topic-cluster embeddings, per-creator and per-topic caps, an exploration budget and negatively weighted satisfaction heads, and monitor topic entropy and coverage.
 You stack several defences, none of which is sufficient alone: diversity reranking, hard caps, exploration, and satisfaction signals. Maximal Marginal Relevance reranks on *topic-cluster* embeddings (not just creator id, so two videos on the same news event count as similar); per-creator/per-topic caps sit in the rules stage; an exploration budget that injects novel items at non-top positions; and satisfaction heads (with negative fusion weight) that penalize content users mark "not interested". You monitor topic entropy and catalog coverage in the top-20 to catch collapse early.
 
 **Q: How should you evaluate a change offline before an A/B test, given watch-time labels mature over time?**
+**Short:** Use chronological splits, check calibration and per-head AUC plus retrieval recall, and treat offline metrics as a filter because long-horizon retention is only measurable online.
 Use strictly chronological splits — train on the past, evaluate on the future — so you never leak engagement that had not matured at impression time. Then evaluate the watch-time head on calibration (predicted vs actual seconds) as well as AUC, plus per-head AUC for satisfaction tasks and retrieval recall@K. But treat offline metrics as a filter, not a verdict: the real objective is long-horizon (7/28-day retention and watch time), which only an online experiment measures, because a model that adds healthy exploration can look slightly worse on immediate offline CTR.
 
 **Q: Why weight watch time by a clipped or log transform rather than raw seconds?**
+**Short:** Raw watch time is heavy-tailed, so multi-hour videos dominate the weighted loss; clipping or a log transform keeps training stable and focused on typical viewing.
 Raw watch time is heavy-tailed — multi-hour live streams and lectures produce enormous sample weights that dominate the weighted-logistic loss and destabilize training, degrading recommendations for ordinary videos. Clipping the weight at a high percentile (or using log-watch-time) keeps the objective focused on typical viewing while still ranking longer-engagement videos higher. You verify the fix by watching the calibration curve, not just AUC.
 
 **Q: How does this differ from ranking a scrollable feed (e.g., a social timeline)?**
+**Short:** A feed ranks mixed items for simultaneous display on multi-action engagement; watch-next ranks one item type for sequential viewing against a watch-time objective.
 A feed ranks heterogeneous items for simultaneous display and optimizes a blend of engagement actions, while "watch next" ranks one homogeneous item type for sequential consumption against a watch-time objective. A feed's items are posts, images and short clips shown together, with strong position effects across the whole visible list; watch-next has a single dominant, directly-measurable objective and often a strong seed (currently-playing) signal. The retrieval+ranking skeleton is shared, but the objective (watch time vs multi-action engagement) and the sequential vs simultaneous consumption pattern differ. See [Content Feed Ranking](design_content_feed_ranking.md).
 
 **Q: Where does the system's compute cost concentrate, and how do you plan capacity?**
+**Short:** Ranking FLOPs dominate GPU spend at 5x10^8 candidate-scores/s, while ANN fan-out to every shard dominates CPU cores; hot keys for viral videos are the scaling risk.
 Compute concentrates on ranking-model scoring: 1M req/sec × ~500 candidates ≈ 5×10^8 candidate-scores/sec, which is where the FLOPs and the GPU spend go (~200 GPUs). ANN retrieval is cheap *per vector* — product quantization shrinks the 100 GB index to ~3 GB — but it is not a small fleet, because every request fans out to all ~16 shards: 1.6×10^7 shard-queries/sec is order 10^4 cores. Multiply by the shard count; forgetting the fan-out is the classic capacity-estimate error here. The other risk is not average throughput but *hot keys* — a viral or live video whose features and real-time counters concentrate load — mitigated with in-process L1 caching of the head of the popularity distribution and sharded counters summed on read.
 
 **Q: Would you use online learning to update the ranker in real time?**
+**Short:** Usually not; daily batch retrain plus real-time features gets most of the freshness without the instability of online updates on noisy, immature, position-biased labels.
 Usually not fully online. The standard is daily batch retraining plus real-time *features* (streaming freshness counters), which captures most of the benefit of recency without the instability of continuous gradient updates on noisy, position-biased, not-yet-matured labels. True online learning is reserved for narrow, well-calibrated signals; for the main multitask ranker, daily retrain + fresh features is more stable and easier to validate before rollout.
 
 **Q: How do you keep watch-time maximization from harming long-term user wellbeing and retention?**
+**Short:** Add satisfaction heads with strong negative fusion weight for dissatisfaction, evaluate on long-horizon retention, and keep a holdout not optimized purely for engagement.
 Add explicit satisfaction objectives to the MMoE and weight dissatisfaction strongly negative in score fusion, so compulsive-but-regretted content is demoted even if it wins raw watch time. Those objectives are the signals Zhao et al. group as satisfaction: likes, dismissals, "not interested", and periodic user-satisfaction survey ratings. Evaluate on long-horizon retention rather than same-session watch time, and maintain a holdout that is never optimized purely for engagement, so you can detect when short-term watch-time gains are eroding the longer-term metric.
+
+**Q: Why does an in-batch softmax retriever need a logQ correction, and how do you get Q without a fixed vocabulary?**
+**Short:** In-batch negatives over-sample popular videos, so subtract log of each video's batch probability, estimated from the stream with hashed last-seen and gap arrays.
+Because in-batch negatives are sampled in proportion to popularity, so a head video is used as a negative far more often than a niche one and the loss pushes it away from every user. Subtracting `log p_j`, the probability that video `j` appears in a batch, from its logit cancels that sampling bias (§4.6). Yi et al. (RecSys 2019) estimate `p_j` from the training stream with two hashed arrays, the last step each item was seen and a moving average of the gap between sightings, so `p_j ≈ 1/gap` works for videos uploaded an hour ago. Validate it with recall@500 split by popularity decile, since the aggregate number hides the bias.
+
+**Q: When should the training example for a clicked impression be emitted, and what goes wrong with a fixed cutoff?**
+**Short:** At session end or a duration-scaled capped deadline; a fixed cutoff truncates long videos' labels and teaches the ranker to undervalue long-form content.
+Emit it when the watch-time label is final: at session end if the client reports it, otherwise at a deadline scaled by the video's duration with a hard cap. A fixed cutoff, say 10 minutes, truncates every watch still in progress, and truncation grows with video length, so a 60-minute video loses more than half of its label while a 3-minute video loses nothing (§4.7). The weighted-logistic ranker then undervalues long videos and long-form share falls each retrain, with no error anywhere. Gate releases on impression share per duration bucket to catch it.
+
+**Q: How do you size the streaming state for the label join?**
+**Short:** Apply Little's law: open labels equal clicked-impression rate times mean hold time, about 39 GB at 400k clicks/s and a 1,520 s mean hold, before overhead.
+Use Little's law: open labels = clicked-impression rate × mean time each label stays open. At 400k clicked impressions/s and a mean hold of about 1,520 s under the duration-scaled deadline, that is about 6×10^8 open labels, roughly 39 GB at 64 bytes each before backend overhead and replication (§10). The 6-hour cap bounds the worst case, but the mean duration sets the bill, which is why a generous cap is cheap. Size for peak rate, not average.
+
+**Q: Offline AUC is unchanged after a pipeline change, but the "not interested" rate on mobile rose 9%. Where do you look?**
+**Short:** Check per-segment calibration, because AUC ignores scale and fused heads are multiplied; a head over-predicting on mobile re-weights every mobile ranking.
+Look at calibration per segment, because AUC measures ordering within one head and ignores scale. The final score multiplies heads, so a watch-time head that now over-predicts by 30% on mobile re-weights watch time against the satisfaction penalty for every mobile ranking (Pitfall 9). Check predicted versus actual watch seconds per device and per decile, recalibrate each head (isotonic or Platt) before fusion, and add per-segment calibration to the offline release gate so the next change is caught before traffic.
+
+**Q: When is online training, as in ByteDance's Monolith, worth it over a daily retrain?**
+**Short:** When reacting within minutes is worth a more fragile training system, as in short-video and ads; for long-form on mature labels, daily retrain plus streaming features suffices.
+When the value of reacting within minutes is larger than the cost of a more fragile training system: short-video and ads ranking, where items and interests turn over in hours, are the cases Monolith's authors cite. Monolith pairs online training with a collisionless embedding table that expires and frequency-filters IDs to bound memory, and its authors state that some reliability is traded for real-time learning. For a long-form watch-next ranker on mature labels (Decision 6), daily retrain plus streaming features captures most of the freshness at far lower risk.

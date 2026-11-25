@@ -758,13 +758,11 @@ Note the enclosing-box term is also what makes GIoU slower to converge early (th
 
 ## 7. Real-World Examples
 
-**Autonomous driving (Waymo)**: uses a 3D detection pipeline operating on LiDAR point clouds + camera images. The camera branch resembles Faster R-CNN fused with depth features. Operates at 10Hz; 3D mAP on KITTI benchmark typically > 90% for easy vehicles.
+**Autonomous driving (Waymo Open Dataset)**: the public benchmark that shaped 3D detection. Its perception set has 1,150 scenes of 20 seconds each, recorded with five LiDARs and five cameras at 10 Hz and labelled with 3D boxes. Leaderboards score mAPH (mAP weighted by heading accuracy), because a box with the right position and the wrong heading predicts the wrong future path. The 10 Hz rate sets the latency budget: a detector that takes longer than 100 ms per sweep falls behind the sensor.
 
-**Amazon Go cashierless stores**: overhead cameras run a real-time multi-person tracking + product detection pipeline. Uses two-stage detectors for high accuracy on small product items; custom-trained on proprietary shelf datasets with 10k+ SKU categories.
+**Medical pathology (Paige Prostate)**: the FDA granted De Novo authorization DEN200080 on 2021-09-21 for Paige Prostate, software that flags the area of a prostate biopsy slide most likely to contain cancer for the pathologist to review. It is assistive by design: the pathologist still reads the slide, and the device's job is recall on a gigapixel image no human scans exhaustively. That framing, detection as a pointer for a human rather than a final decision, is the common pattern for regulated detection products.
 
-**Instagram photo tagging**: YOLOv5 variant runs on every uploaded photo to detect faces, QR codes, and objects for accessibility alt-text generation. Optimized for CPU inference on commodity servers; batch size 64, ~8ms per image.
-
-**Medical pathology (Paige AI)**: Faster R-CNN detects cancerous regions in whole-slide pathology images at 40x magnification (100k x 100k pixel tiles). Achieves AUC 0.99 for prostate cancer detection, FDA-cleared in 2021.
+**Worked example: will the detector even see the object?** A 1920-pixel-wide camera with a 60-degree horizontal field of view has a focal length of `960 / tan(30 deg) = 1,663` pixels. A 30 cm traffic sign at 100 m therefore spans `0.30 x 1,663 / 100 = 5` pixels. The finest feature map of a typical FPN detector (P3) has stride 8, so the whole sign falls inside one cell and its features are averaged with the background. The options follow from the arithmetic: a narrower lens for the forward camera (a 30-degree lens doubles the focal length to about 3,580 pixels, 11 pixels for the sign), a stride-4 P2 level at roughly 4x the compute of P3, or tiling the image at inference time. Doing this calculation before training saves a month of tuning anchors for an object the network cannot resolve.
 
 ---
 
@@ -819,6 +817,27 @@ Detection models with FPN and RPN are sensitive to batch normalization statistic
 
 **Pitfall 6: Shipping an AGPL-3.0 detector inside a closed product**
 A startup fine-tuned YOLO11 with the `ultralytics` package and served it behind a paid API. During due diligence for an acquisition, the buyer's counsel flagged that the AGPL-3.0 network clause applied to the modified training and inference code and that Ultralytics requires an Enterprise License for closed commercial use. The deal paused until the team bought a license, which they could have avoided by retraining RF-DETR or D-FINE (Apache 2.0) at a similar accuracy and latency. Fix: record the license of every model, checkpoint, and training library in the model card at project start, and treat a license change as a design decision.
+
+**Pitfall 4 as code: the image is resized, the boxes are not.**
+
+```python
+# BROKEN: boxes stay in the original pixel coordinates
+from torchvision.transforms import v2
+
+img = v2.functional.resize(img, [640, 640])
+target = {"boxes": boxes, "labels": labels}      # boxes still for an (h, w) image
+```
+
+```python
+# FIX: wrap boxes as tv_tensors so every v2 transform moves them with the image
+from torchvision import tv_tensors
+
+boxes = tv_tensors.BoundingBoxes(boxes, format="XYXY", canvas_size=(h, w))
+img, boxes = v2.Resize((640, 640))(img, boxes)
+target = {"boxes": boxes, "labels": labels}
+```
+
+Training still runs and the loss still falls, because the model can partly fit any consistent target. mAP stays far below the expected number, and the error only becomes obvious when one batch is drawn with its boxes. With `tv_tensors.BoundingBoxes`, the same `v2` pipeline handles resize, crop and flip for the image and boxes together, so they cannot drift apart. Draw one augmented batch before every long training run.
 
 ---
 
@@ -966,3 +985,50 @@ Results: mAP@0.5 = 0.847, mAP@[0.5:0.95] = 0.612. Inference: 15ms per image (67 
 3. Applied class-weighted loss: damage class weight = 3.0.
 
 **Final results**: damage AP = 0.63, overall mAP@0.5 = 0.891. Deployed as TensorRT FP16 engine, 8ms per image (125 fps — headroom for SAHI overhead of 4 patches per image: ~32ms, still 30+ fps).
+
+**BROKEN → FIX: shrinking the frame to the model's input size.** Small-object recall is mostly decided before the network runs.
+
+```python
+from collections.abc import Callable
+
+import torch
+import torch.nn.functional as F
+from torchvision.ops import batched_nms
+
+# detect(image CHW) -> (boxes xyxy (N, 4), scores (N,), labels (N,))
+Detector = Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
+
+# BROKEN: letterbox the whole 1920x1080 frame down to the 640 px model input
+def detect_broken(frame: torch.Tensor, detect: Detector) -> tuple[torch.Tensor, ...]:
+    small = F.interpolate(frame[None], scale_factor=640 / 1920, mode="bilinear")[0]
+    boxes, scores, labels = detect(small)
+    return boxes * (1920 / 640), scores, labels   # a 30x30 px dent was 10x10 px when the model saw it
+```
+
+```python
+# FIX: run the detector on overlapping native-resolution tiles, then de-duplicate
+def _starts(length: int, tile: int, step: int) -> list[int]:
+    starts = list(range(0, max(length - tile, 0) + 1, step))
+    if starts[-1] + tile < length:
+        starts.append(length - tile)               # last tile flush with the edge
+    return starts
+
+
+def detect_sliced(frame: torch.Tensor, detect: Detector, tile: int = 640,
+                  overlap: float = 0.2, iou: float = 0.5) -> tuple[torch.Tensor, ...]:
+    _, h, w = frame.shape
+    step = int(tile * (1 - overlap))
+    boxes, scores, labels = [], [], []
+    for y in _starts(h, tile, step):
+        for x in _starts(w, tile, step):
+            b, s, l = detect(frame[:, y:y + tile, x:x + tile])
+            boxes.append(b + torch.tensor([x, y, x, y], dtype=b.dtype))   # back to frame coords
+            scores.append(s)
+            labels.append(l)
+    b, s, l = torch.cat(boxes), torch.cat(scores), torch.cat(labels)
+    keep = batched_nms(b, s, l, iou)               # objects seen by two overlapping tiles
+    return b[keep], s[keep], l[keep]
+```
+
+Downscaling by 3x shrinks a 30x30 px damage region to 10x10 px, which covers barely one cell of the detector's finest stride-8 feature map and leaves only about 100 pixels of texture to recognise; tiling keeps it at 30x30 (900 pixels). For a 1920x1080 frame with 640 px tiles and 20% overlap the start positions are x = 0, 512, 1024, 1280 and y = 0, 440, so 8 tiles per frame, which is the latency bill to check against the 60 fps SLA. Add one full-frame pass to the merge so a package larger than a tile is not cut into pieces.

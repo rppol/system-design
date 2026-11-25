@@ -1,5 +1,7 @@
 # Open-Vocabulary Detection and Vision Foundation Models — Deep Dive
 
+> Paper numbers, model releases (SAM 3/3.1, DINOv3), licenses and the `transformers` APIs used below were checked against arXiv, the official repositories and the `transformers` source on 2026-11-25.
+
 ---
 
 ## 1. Concept Overview
@@ -98,6 +100,8 @@ The practical effect is on §4F: one SAM 3 call does the job of the Grounding DI
 DINOv2 ([Oquab et al., 2023, arXiv:2304.07193](https://arxiv.org/abs/2304.07193)) — trained as described in [self_supervised_vision.md](self_supervised_vision.md) — is used in production as a **frozen trunk**: run the image once through the pretrained ViT, keep every weight fixed, and train only a small head (a linear layer, a lightweight decoder) on top of the patch-token features for the downstream task — dense correspondence, monocular depth, or a segmentation mask via a linear probe. The value proposition is the same as CLIP's for text-conditioned tasks, but for tasks with no natural language interface: DINOv2 features are dense (one embedding per patch, not one per image), so they carry the spatial information a per-pixel task needs without any labeled dense-prediction data to fine-tune the backbone itself.
 
 Freezing the backbone is a deliberate choice, not a shortcut taken for lack of compute. Fine-tuning the full ViT on a small task-specific dataset risks overwriting the general-purpose structure the self-supervised pretraining spent enormous compute to learn — a failure mode sometimes called catastrophic forgetting of the pretrained representation. Keeping the trunk frozen and training only a small head bounds how much the small, potentially noisy downstream dataset can distort the backbone: the worst case is an undertrained head, not a corrupted backbone.
+
+**DINOv3 (Meta, August 2025, [arXiv:2508.10104](https://arxiv.org/abs/2508.10104)) is the current generation of the same idea.** It trains a ViT-7B/16 teacher on LVD-1689M, a curated set of about 1.7 billion web images, and ships distilled students (ViT-S/16 through ViT-H+/16, plus ConvNeXt Tiny to Large) so the frozen-trunk pattern fits edge budgets too. A separate set of checkpoints is trained on SAT-493M satellite imagery. Hugging Face `transformers` supports the backbones from 4.56.0. Two practical differences from DINOv2 matter when you swap it in: the patch size is 16, not 14, so a 518x518 input that gave a 37x37 DINOv2 grid needs 512x512 (32x32) or 592x592 (37x37) for DINOv3; and the weights use the DINOv3 License, not Apache 2.0 (§8).
 
 ### F. The composite pipeline — box in, mask out, with no labeled masks
 
@@ -231,7 +235,7 @@ with torch.no_grad():
 results = processor.post_process_grounded_object_detection(
     outputs,
     inputs.input_ids,
-    box_threshold=0.35,
+    threshold=0.35,               # box score cutoff (named box_threshold before transformers 4.49)
     text_threshold=0.25,          # separate threshold for the text-token match itself
     target_sizes=[image.size[::-1]],
 )[0]
@@ -240,7 +244,7 @@ for box, score, label in zip(results["boxes"], results["scores"], results["text_
     print(f"{label}: {score:.2f} at {box.tolist()}")
 ```
 
-Grounding DINO exposes **two** thresholds where OWLv2 exposes one: `box_threshold` gates the box-objectness score, and `text_threshold` separately gates how well the box's region matches the queried text tokens. This is a direct consequence of the fused-decoder architecture in §4B — box quality and text-match quality are scored by different parts of the cross-modality decoder, not by a single cosine similarity, so they need independent cutoffs rather than the one threshold OWLv2's simpler matching head requires.
+Grounding DINO exposes **two** thresholds where OWLv2 exposes one: `threshold` gates the box score, and `text_threshold` separately gates which text tokens count as matched, which decides the label string a box gets. This is a direct consequence of the fused-decoder architecture in §4B — box quality and text-match quality are scored by different parts of the cross-modality decoder, not by a single cosine similarity, so they need independent cutoffs rather than the one threshold OWLv2's simpler matching head requires.
 
 ### Handing a box to SAM for a mask
 
@@ -281,19 +285,61 @@ best = masks[np.argmax(iou_preds)]    # highest predicted-IoU candidate
 The text encoder forward pass does not depend on the image, so it should never be inside the per-image loop. Embed all `Nq` class-name strings once, cache the resulting `Nq × D` matrix, and reuse it for every image processed in the run:
 
 ```python
-# Correct: text embeddings computed once, outside the per-image loop.
-text_bank = processor(text=[class_names], return_tensors="pt")
-with torch.no_grad():
-    text_embeds = model.owlv2.get_text_features(**text_bank)  # [Nq, D], cached
+from collections.abc import Iterable
 
-for image in image_stream:
-    image_inputs = processor(images=image, return_tensors="pt")
+import torch
+from PIL import Image
+from transformers import Owlv2ForObjectDetection, Owlv2Processor
+
+
+def embed_queries(
+    processor: Owlv2Processor, model: Owlv2ForObjectDetection, class_names: list[str]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the text encoder ONCE for the whole class list. Returns [1, Nq, D] and a [1, Nq] mask."""
+    tokens = processor(text=[class_names], return_tensors="pt")
     with torch.no_grad():
-        vision_out = model.owlv2.get_image_features(**image_inputs)
-    scores = vision_out @ text_embeds.T  # [num_boxes, Nq] — one matmul, not Nq forward passes
+        out = model.owlv2.get_text_features(
+            input_ids=tokens["input_ids"], attention_mask=tokens["attention_mask"]
+        )
+    text = getattr(out, "pooler_output", out)  # transformers v5 returns an output object
+    query_embeds = text.unsqueeze(0)           # [1, Nq, D]
+    query_mask = torch.ones(query_embeds.shape[:2], dtype=torch.bool)
+    return query_embeds, query_mask
+
+
+def detect_stream(
+    processor: Owlv2Processor,
+    model: Owlv2ForObjectDetection,
+    images: Iterable[Image.Image],
+    class_names: list[str],
+) -> Iterable[tuple[torch.Tensor, torch.Tensor]]:
+    query_embeds, query_mask = embed_queries(processor, model, class_names)  # cached
+    for image in images:
+        pixel_values = processor(images=image, return_tensors="pt")["pixel_values"]
+        with torch.no_grad():
+            feature_map, _ = model.image_embedder(pixel_values=pixel_values)  # [1, 60, 60, 768]
+            b, h, w, d = feature_map.shape
+            patch_feats = feature_map.reshape(b, h * w, d)                    # 3,600 candidate boxes
+            logits, _ = model.class_predictor(patch_feats, query_embeds, query_mask)  # [1, 3600, Nq]
+            boxes = model.box_predictor(patch_feats, feature_map)             # [1, 3600, 4], cxcywh 0-1
+        yield logits[0], boxes[0]
 ```
 
-Per-image cost then splits into two very different-sized pieces: one image-encoder forward pass (the expensive part, and fixed regardless of `Nq`), plus a `cosine_similarity(boxes, text)` matmul that is `O(num_boxes × Nq × D)`. For a typical OWLv2 output of a few thousand candidate boxes, a 50-class query list, and `D = 768`, that matmul is on the order of `10^8` multiply-adds — trivial next to the backbone's own FLOPs. The mistake to avoid is re-running the text encoder inside the image loop: that turns an operation whose cost is independent of `Nq` into one that scales linearly with it, multiplying wall-clock time by the size of the class list for no accuracy benefit, since the text embeddings never change.
+The image side uses `image_embedder`, which keeps one embedding per patch, not
+`get_image_features`, which returns a single pooled vector per image and cannot score boxes.
+
+Per-image cost then splits into two very different-sized pieces: one image-encoder forward pass (the expensive part, and fixed regardless of `Nq`), plus a box-by-query similarity matmul that is `O(num_boxes × Nq × D)`. The mistake to avoid is re-running the text encoder inside the image loop: that turns an operation whose cost is independent of `Nq` into one that scales linearly with it, multiplying wall-clock time by the size of the class list for no accuracy benefit, since the text embeddings never change.
+
+**Worked numbers for `owlv2-base-patch16-ensemble`.** The processor pads and resizes every image
+to 960x960, so the ViT-B/16 encoder sees `(960 / 16)^2 = 3,600` patch tokens of width 768, and
+every patch is a candidate box. Per transformer layer the multiply-adds are about
+`12 N d^2 + 2 N^2 d = 12 x 3,600 x 768^2 + 2 x 3,600^2 x 768 = 2.55e10 + 1.99e10 = 4.5e10`, so
+12 layers cost about `5.4e11`. The similarity step for 50 queries in the 512-dimensional
+projection space is `3,600 x 50 x 512 = 9.2e7` multiply-adds, which is 0.017% of the encoder.
+Growing the query list from 50 to 1,000 classes raises that to 0.34%. The text encoder is the
+part that would hurt: a 12-layer, 512-wide text transformer over 16 tokens is about `6e8`
+multiply-adds per class, so re-embedding 1,000 class names per image would add about `6e11`,
+more than the image encoder itself, which doubles per-image cost for nothing.
 
 ### Closing the loop — distilling into the served model
 
@@ -532,9 +578,55 @@ OWL-ViT/OWLv2, Grounding DINO, SAM, SAM 2, and DINOv2's base checkpoints are rel
 
 **Stage 2 — review, not full relabel.** Only the bottom 15% of pseudo-labels by confidence are routed to a human reviewer (the dashed loop in §5's diagram); the rest are accepted as-is. This keeps total human labeling effort to roughly 1,500 reviewed images instead of the ~15,000-image dataset a from-scratch supervised effort would have required.
 
-**Stage 3 — distill.** The resulting dataset trains an RT-DETR-L model from scratch. RT-DETR was chosen over a YOLO variant specifically because the "wrong-part placement" class produces heavily overlapping candidate boxes (a correct part and several visually similar wrong parts stacked in nearly the same location), the exact crowded-scene scenario where NMS-based detectors lose recall (see [object_detection.md](object_detection.md)'s NMS pitfalls) and RT-DETR's NMS-free set prediction does not.
+**Stage 3 — distill.** The resulting dataset fine-tunes a COCO-pretrained RT-DETR-L model (the `rtdetr-l.pt` start point from §6). RT-DETR was chosen over a YOLO variant specifically because the "wrong-part placement" class produces heavily overlapping candidate boxes (a correct part and several visually similar wrong parts stacked in nearly the same location), the exact crowded-scene scenario where NMS-based detectors lose recall (see [object_detection.md](object_detection.md)'s NMS pitfalls) and RT-DETR's NMS-free set prediction does not.
 
 **Stage 4 — validate before trusting the pseudo-labels.** Before training RT-DETR on the full pseudo-labeled set, the team ran Pitfall 5's gate explicitly: any box below the per-class threshold from Stage 1 was dropped before it ever reached SAM, rather than filtering on anything about the resulting mask. A held-out set of 300 boards was independently hand-labeled purely to score the pseudo-labeling pipeline itself (not to train on) — this is the step that would have caught a systematically miscalibrated threshold before it silently degraded every downstream training run.
+
+**BROKEN -> FIX: the first distillation run trained on boxes in the wrong coordinate system.**
+Grounding DINO's post-processing returns absolute pixel corners `(x0, y0, x1, y1)`, while the
+YOLO-format label files that `ultralytics` reads expect `class cx cy w h`, each normalized to
+0-1 by the image size. The first export wrote pixel corners straight into the label files. The
+trainer did not crash: its dataset check marks any label file with a coordinate above 1 as
+corrupt and skips that image with a one-line warning, so every image with a defect box dropped
+out of training and only the defect-free images with empty label files remained. The first RT-DETR run scored 0.04 mAP50 on
+the 300-board audit set, which looked like "pseudo-labels are too noisy" until someone opened a
+label file.
+
+```python
+from pathlib import Path
+
+
+# BROKEN: pixel corners written as if they were normalized centre/size
+def write_label_broken(path: Path, cls: int, box: tuple[float, float, float, float]) -> None:
+    x0, y0, x1, y1 = box
+    path.write_text(f"{cls} {x0} {y0} {x1} {y1}\n")
+
+
+# FIX: convert corners to a normalized centre and size, clamp, and refuse degenerate boxes
+def write_label(path: Path, cls: int, box: tuple[float, float, float, float], img_w: int, img_h: int) -> None:
+    x0, y0, x1, y1 = box
+    x0, x1 = max(0.0, x0), min(float(img_w), x1)
+    y0, y1 = max(0.0, y0), min(float(img_h), y1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return  # a sub-2-pixel box is detector noise, not a defect
+    cx, cy = (x0 + x1) / 2 / img_w, (y0 + y1) / 2 / img_h
+    w, h = (x1 - x0) / img_w, (y1 - y0) / img_h
+    with path.open("a") as f:
+        f.write(f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+
+
+if __name__ == "__main__":
+    out = Path("board_0001.txt")
+    out.unlink(missing_ok=True)
+    # A 40x20 px solder bridge at (1000, 500) on a 2048x1536 line-camera frame:
+    write_label(out, 0, (1000.0, 500.0, 1040.0, 520.0), img_w=2048, img_h=1536)
+    print(out.read_text())  # 0 0.498047 0.332031 0.019531 0.013021
+```
+
+The fix added an export-time assertion that every label value lies in 0-1 and that the
+per-class box count in the label files matches the count in the pseudo-label database. The
+rerun on the same pseudo-labels reached the accuracy the case study reports; the model had not
+changed, only the coordinates.
 
 **Result**: the served model is RT-DETR-L, not Grounding DINO — inference cost and latency match a purpose-built detector, comfortably inside the 200ms budget, while the training data behind it cost roughly 1,500 human-reviewed images instead of a full manual annotation pass. Grounding DINO and SAM never run in the production loop; their entire contribution is upstream, in the dataset that trained RT-DETR.
 

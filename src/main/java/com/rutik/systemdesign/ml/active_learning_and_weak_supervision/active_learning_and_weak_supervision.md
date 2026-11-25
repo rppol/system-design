@@ -48,6 +48,18 @@ Key insight: more labels are not the goal — more *informative* labels are. Act
 6. **Probabilistic labels, then a noise-aware learner.** Weak supervision yields soft labels; train a downstream model with a loss that respects label uncertainty rather than hard-thresholding too early.
 7. **Beware feedback bias.** A model that chooses its own labeling targets can entrench its blind spots; mix in random samples and monitor the labeled distribution.
 
+**Why principle 4 needs a label model — majority vote versus correlated sources.** Take three labeling functions, each 70% accurate on the examples they cover:
+
+```
+independent errors:  P(majority correct) = p^3 + 3 p^2 (1 - p)
+                                         = 0.343 + 3 x 0.49 x 0.3 = 0.343 + 0.441 = 0.784
+
+two LFs are copies:  the copies always agree, so they always form the majority
+                     P(majority correct) = p = 0.70   (the third LF never changes the vote)
+```
+
+Majority vote gains 8.4 points when errors are independent and nothing at all when two sources are the same heuristic written twice, which is common (two regexes for the same phrase). A label model such as Snorkel's estimates each function's accuracy and the correlations between functions from their agreements and disagreements on unlabeled data, then down-weights the duplicates, which majority vote cannot do.
+
 ---
 
 ## 4. Types / Architectures / Strategies

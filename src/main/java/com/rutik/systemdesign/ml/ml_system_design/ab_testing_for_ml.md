@@ -832,6 +832,25 @@ FWER = 1 - (1 - alpha)^k
 
 **Testing on insufficient traffic segments**: a model for enterprise users is A/B tested on the 5% of users who are enterprise accounts. Enterprise users have highly variable revenue (std = 5x mean). To detect a 2% relative revenue change at alpha = 0.05 and 80% power, `n = 2 * (5m)^2 * 2.80^2 / (0.02m)^2` — the mean `m` cancels — which is about 981,000 per variant. With only 5% of 100K users (5,000 enterprise users), the experiment can never reach power. Fix: compute sample size before designing the experiment; if insufficient traffic exists, use a proxy metric with lower variance or consider a qualitative evaluation.
 
+**SRM as code: reading the lift before checking the split.**
+
+```python
+# BROKEN: the readout trusts the 50/50 split
+lift = treat_conv / treat_n - ctrl_conv / ctrl_n
+```
+
+```python
+# FIX: gate every readout on a sample-ratio-mismatch test
+from scipy.stats import chisquare
+
+_, p = chisquare([ctrl_n, treat_n], f_exp=[(ctrl_n + treat_n) / 2] * 2)
+if p < 0.001:
+    raise RuntimeError(f"SRM: {ctrl_n} vs {treat_n} (p={p:.1e}); fix assignment before reading metrics")
+lift = treat_conv / treat_n - ctrl_conv / ctrl_n
+```
+
+A 52/48 split on 1M users gives a chi-square of 1,600 against an expected 50/50, so p is effectively 0: the arms are not comparable, because something (a redirect, a bot filter, a crash in one arm) removed users non-randomly. The broken readout reports a clean lift anyway. Make the SRM check a hard gate in the analysis code, not a chart someone may look at.
+
 ---
 
 ## 11. Technologies & Tools
@@ -970,3 +989,33 @@ At 100,000 users/day per variant → under 1 day required. Running for 7 days an
 **Decision**: deploy the LightGBM model. CTR improvement is statistically and practically significant. Revenue shows a directional positive signal but does not survive the Bonferroni correction, so it is not a claim, only a reason to keep measuring. Latency within SLA. The revenue figure should therefore not be annualized as if it were established: `$0.50/user * 200,000 DAU * 365 = $36.5M` is the *upper* end of a range whose lower end is zero, and it additionally assumes the $0.50 is a per-user-per-day figure. If revenue per user was measured over the full 7-day window, the correct annualization is `$0.50 * 200,000 * 365/7 = $5.2M`. State which period the metric covers before quoting any annual number.
 
 **Post-launch monitoring**: CTR monitored for 2 weeks post-rollout. Effect stable at +0.31%. No novelty effect decay detected.
+
+**BROKEN → FIX: checking the p-value every day and shipping at the first p < 0.05.** The 7-day horizon above was fixed in advance; the common failure is to peek.
+
+```python
+from statsmodels.stats.proportion import proportions_ztest
+
+# daily rows: (control_clicks, control_users, treatment_clicks, treatment_users)
+Day = tuple[int, int, int, int]
+
+
+# BROKEN: seven looks at alpha = 0.05, stop at the first "win"
+def peek_and_ship(days: list[Day]) -> int | None:
+    c_clk = c_n = t_clk = t_n = 0
+    for day, (cc, cn, tc, tn) in enumerate(days, start=1):
+        c_clk, c_n, t_clk, t_n = c_clk + cc, c_n + cn, t_clk + tc, t_n + tn
+        _, p = proportions_ztest([t_clk, c_clk], [t_n, c_n])
+        if p < 0.05:
+            return day             # shipped
+    return None
+```
+
+```python
+# FIX: one look, at the horizon the power calculation chose
+def fixed_horizon(days: list[Day], horizon: int = 7, alpha: float = 0.05) -> bool:
+    cc, cn, tc, tn = (sum(col) for col in zip(*days[:horizon]))
+    _, p = proportions_ztest([tc, cc], [tn, cn])
+    return p < alpha
+```
+
+Each extra look is another chance for noise to cross the line. A Monte Carlo run of 400,000 A/A experiments with seven equally spaced looks at a two-sided 1.96 boundary rejected the true null 16.6% of the time, more than three times the nominal 5%. If stakeholders need daily read-outs, use a group-sequential design whose boundary is planned up front (O'Brien-Fleming spends almost no alpha on early looks) or an always-valid sequential test, and record the plan before day 1.

@@ -975,3 +975,24 @@ flowchart LR
 - Cross-encoder fine-tuning on 5K in-domain pairs (from 200 sampled queries × 25 judged documents each) added 6 NDCG points — the single largest improvement step.
 - Latency: 480ms p95 was acceptable for document search (not real-time autocomplete). Reducing rerank pool from 50 to 25 docs: latency 240ms, NDCG 0.65 (acceptable tradeoff for time-sensitive analysts).
 - BM25 k1 was tuned from default 1.2 to 1.5 for financial text — regulatory documents repeat key terms heavily; higher k1 reduces over-saturation on "regulation", "compliance", "disclosure".
+
+**BROKEN → FIX: encoding with E5 but without its prefixes.** E5 models are trained with a role prefix on every input, and the dense leg of the hybrid silently loses quality without them.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("intfloat/e5-large-v2")
+
+# BROKEN: raw text on both sides
+doc_emb = model.encode(docs, normalize_embeddings=True)
+q_emb = model.encode([query], normalize_embeddings=True)
+```
+
+```python
+# FIX: "passage: " on documents, "query: " on queries, unit vectors so inner product == cosine
+doc_emb = model.encode([f"passage: {d}" for d in docs], normalize_embeddings=True, batch_size=64)
+q_emb = model.encode([f"query: {query}"], normalize_embeddings=True)
+scores = doc_emb @ q_emb[0]
+```
+
+The `intfloat/e5-large-v2` model card answers "Do I need to add the prefix?" with "Yes, this is how the model is trained, otherwise you will see a performance degradation", and asks for `query: ` / `passage: ` on asymmetric retrieval like this one. Because the prefix is part of what was embedded, fixing it means re-embedding all 10M documents, so check it before the first full index build. The same model card notes that E5 cosine scores cluster between about 0.7 and 1.0 (a training temperature of 0.01), so rank by score and fuse with RRF as above rather than applying an absolute similarity cut-off.

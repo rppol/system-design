@@ -169,13 +169,13 @@ Synchronous training has no slack for a dead rank: when one process crashes or i
 |---|---|---|
 | `torchrun` (TorchElastic) | Tears down every worker and restarts the whole group, up to `--max-restarts` times; `--nnodes=MIN:MAX` lets it restart on fewer nodes | All steps since the last checkpoint, plus restart and reload time |
 | `torch.distributed.checkpoint` (DCP) | Every rank writes its own shard; load reshards to the new world size, so a 16-node checkpoint loads on 15 nodes | Nothing beyond the checkpoint interval |
-| In-place process-group reconfiguration (PyTorch 2.14, experimental) | Surviving processes rebuild the process group in place instead of exiting; supported on Gloo and the experimental `nccl2` backend | The in-flight step; the APIs are experimental |
+| In-place process-group reconfiguration (PyTorch 2.14, experimental) | Surviving processes rebuild the process group in place instead of exiting; supported on Gloo and on the rewritten NCCL backend (the `nccl2` preview in 2.14, the default `backend="nccl"` from PyTorch 2.15) | The in-flight step; the APIs are experimental |
 | torchft (per-step fault tolerance) | With DDP or HSDP, a Lighthouse server tracks which replica groups are alive each step; the live groups form a quorum and keep training, and a recovered group copies weights from a healthy peer and rejoins at a step boundary | Only the failed replica group's share of the current step |
 | Flight Recorder | Keeps a per-rank ring buffer of recent collectives; the dump shows which rank stopped at which collective. Backend-agnostic since PyTorch 2.14 (NCCL-only before) | Nothing; it is a diagnosis tool |
 
 torchft (Meta PyTorch, presented at PyTorch Conference 2024) works on the replicate dimension because each replica group holds a full copy of the model. Each step, every group's Manager asks the Lighthouse for a quorum; the gradient AllReduce runs only over the groups in that quorum, through fault-tolerant process groups that can be reinitialized without killing the job. A failure inside a replica group still takes that group down, so smaller groups mean a smaller blast radius but less sharding. torchft also implements LocalSGD and DiLoCo, which synchronize replicas every few hundred steps instead of every step, for training across clusters with slow links.
 
-A straggler is the opposite case: no rank is lost, one is slow, so it needs per-rank step-time monitoring and node replacement rather than reconfiguration. PyTorch 2.14 also previews a rewritten NCCL backend (`nccl2`), opted into with `TORCH_DIST_USE_NCCL2=1`.
+A straggler is the opposite case: no rank is lost, one is slow, so it needs per-rank step-time monitoring and node replacement rather than reconfiguration. Since PyTorch 2.15 the rewritten NCCL backend is the default for `backend="nccl"` and carries a flight recorder that dumps on hangs; `backend="nccl-legacy"` or `TORCH_DIST_USE_NCCL2=0` on every rank restores the old implementation for 2.15 only.
 
 ### The Scaling Math: Data Parallel vs Model Parallel
 
@@ -328,7 +328,7 @@ flowchart LR
     class fwd base
 ```
 
-Each rank permanently holds only 1/N of parameters, gradients, and optimizer state (~10M/N bytes total) — in FSDP2 each parameter is its own per-parameter `DTensor` shard rather than a flattened buffer. Before a layer runs, AllGather transiently materializes its full weights, which are freed right after; after backward, ReduceScatter distributes reduced gradients back to shards — trading roughly 2× the communication of DDP for a linear cut in per-GPU memory.
+Each rank permanently holds only 1/N of parameters, gradients, and optimizer state — with mixed-precision Adam that is `P × 16 bytes / N` for a model of `P` parameters (2 BF16 param + 2 BF16 grad + 12 FP32 master/m/v; the itemized bill is below), so 7B on 64 GPUs is `112 GB / 64 = 1.75 GB` per rank — in FSDP2 each parameter is its own per-parameter `DTensor` shard rather than a flattened buffer. Before a layer runs, AllGather transiently materializes its full weights, which are freed right after; after backward, ReduceScatter distributes reduced gradients back to shards — trading roughly 2× the communication of DDP for a linear cut in per-GPU memory.
 
 ### Pipeline parallelism: 1F1B schedule and the bubble
 
@@ -757,13 +757,13 @@ ds_config = {
 
 ## 7. Real-World Examples
 
-**Meta LLaMA 3 (70B)**: trained on 15 trillion tokens using 2,048 H100 GPUs. Used 3D parallelism: 8-way tensor parallelism within a node (NVLink), 16-way pipeline parallelism across nodes, data parallelism across super-nodes. Achieved ~38% MFU. Training took 6.4 million H100-80GB GPU-hours per Meta's model card (1.3 million for the 8B).
+**Meta Llama 3 405B**: trained on up to 16,384 H100 80GB GPUs with 4D parallelism, in the order tensor (TP), context (CP), pipeline (PP), data (DP). The paper's Table 4 gives the three pre-training stages: 8,192 GPUs at TP8 / CP1 / PP16 / DP64 reached 430 TFLOP/s per GPU (43% BF16 MFU); 16,384 GPUs at TP8 / CP1 / PP16 / DP128 reached 400 (41%); and the 131,072-token long-context stage at TP8 / CP16 / PP16 / DP8 reached 380 (38%). Every stage held 16M tokens per batch. TP stays inside one 8-GPU NVLink server, and the drop from 43% to 41% is the paper's own example of a cost of scale: doubling DP halved the batch per DP group, which lowers per-GPU efficiency. The model card lists 6.4 million H100-80GB GPU-hours for the 70B model and 1.3 million for the 8B.
 
-**Google — PaLM (540B)**: trained on 6,144 TPU v4 chips using Pathways (a cross-accelerator system). 12-way model parallelism, 24-way pipeline parallelism, data parallel across pods. TPU interconnect (ICI, 600 GB/s) enabled aggressive tensor parallelism.
+**Worked check of the 43% figure**: MFU = achieved model TFLOP/s / peak. The H100 SXM's dense BF16 peak is 989 TFLOP/s, and 430 / 989 = 0.435. The same arithmetic on the case study in Section 14 (85 / 312 on an A100) gives 27%, which is why that run's next step is a profiler trace.
 
-**OpenAI — GPT-4 (rumored ~1.8T MoE)**: distributed training details not disclosed, but inference is served from multi-node A100 clusters with tensor parallelism.
+**Google PaLM 540B**: trained on 6,144 TPU v4 chips across two pods using Pathways, **without pipeline parallelism**. Inside each 3,072-chip pod, every weight tensor is split with 12-way model parallelism and 256-way fully sharded data parallelism, so each pod holds a full copy of the model; the two pods are data-parallel replicas that exchange gradients over the data-center network. Reported MFU: 46.2% (45.7% without counting self-attention FLOPs). It is the standard counter-example to "large models need pipeline parallelism": a fast enough interconnect let PaLM avoid pipeline bubbles altogether.
 
-**Hugging Face — community fine-tuning**: standard pattern is DDP with 8 A100 GPUs for 7B-13B models, FSDP or DeepSpeed ZeRO-3 for 70B models. QLoRA + DDP fits 70B fine-tuning on 4x A100 40GB.
+**QLoRA (community fine-tuning)**: Dettmers et al. (2023) fine-tuned a 65B model on a single 48 GB GPU by freezing the base weights in 4-bit NF4 and training LoRA adapters in BF16. The usual Hugging Face pattern follows from the memory arithmetic in Section 5: DDP for models whose full training state fits one GPU, FSDP or DeepSpeed ZeRO-3 once it does not, and QLoRA when only adapters need training.
 
 ---
 
@@ -824,6 +824,29 @@ A model had an embedding layer shared (tied weights) between the input embedding
 **Pitfall 5 — Gradient accumulation without set_requires_gradient_sync(False)**
 A team implemented gradient accumulation with FSDP2 but never called `model.set_requires_gradient_sync(False)` for the non-update steps. Each backward pass triggered a full ReduceScatter (gradient sync), not just the final step. With 4 accumulation steps, they paid 4x the communication cost instead of 1x. This made training 2.8x slower than DDP despite the memory savings. Fix: call `model.set_requires_gradient_sync(False)` before the intermediate backward passes and re-enable it (`set_requires_gradient_sync(True)`) before the final one, so only the last backward pass in the accumulation window synchronizes gradients.
 
+**Pitfall 1 as code: the same shuffle every epoch.**
+
+```python
+# BROKEN: DistributedSampler is seeded with seed + epoch, and epoch never changes
+from torch.utils.data import DataLoader, DistributedSampler
+
+sampler = DistributedSampler(dataset, shuffle=True)
+loader = DataLoader(dataset, batch_size=64, sampler=sampler)
+for epoch in range(epochs):
+    for batch in loader:
+        train_step(batch)
+```
+
+```python
+# FIX: tell the sampler which epoch it is, before iterating
+for epoch in range(epochs):
+    sampler.set_epoch(epoch)
+    for batch in loader:
+        train_step(batch)
+```
+
+The broken loop trains normally and every rank still sees a disjoint shard. The only thing missing is a new permutation per epoch, so each rank replays the same samples in the same order every epoch and generalisation is slightly worse. No error and no warning shows it. `set_epoch` reseeds the permutation identically on every rank, which keeps the shards disjoint and changes them each epoch.
+
 ---
 
 ## 11. Technologies & Tools
@@ -864,8 +887,8 @@ AllReduce is a collective operation: every process sends its tensor, the operati
 Gradient accumulation postpones the optimizer update by accumulating gradients across M steps before calling `optimizer.step()`. The effective batch size becomes `local_batch × n_gpus × M`. Use it when: (1) the target batch size exceeds what fits in VRAM for a single step; (2) you want to match a larger-batch baseline without adding GPUs; (3) training with FSDP/ZeRO where per-GPU batch is small. Critical implementation detail: in DDP, use `model.no_sync()` for all non-update steps to suppress AllReduce on each intermediate backward pass — only AllReduce on the final accumulation step.
 
 **Q: How does FSDP2 reduce memory usage compared to DDP?**
-**Short:** FSDP2 shards each parameter as a DTensor to roughly 1/N of DDP's per-GPU memory, temporarily AllGathering full parameters only during each forward pass.
-In DDP, each GPU holds: full model parameters (M bytes) + full gradients (M bytes) + full optimizer states (for Adam: 8M bytes for momentum and variance) = ~10M bytes total. With FSDP2's default configuration (`reshard_after_forward=True`) across N GPUs, each GPU holds: M/N bytes for parameters + M/N bytes for gradients + 8M/N bytes for optimizer states ≈ 10M/N bytes total — a linear memory reduction. FSDP2 shards each parameter individually as a `DTensor` rather than flattening a wrapping unit's parameters into one buffer, so parameters stay individually addressable. Before each forward pass, `fully_shard` issues AllGather to temporarily materialize the full parameter tensor on each GPU (then frees it after use, unless `reshard_after_forward=False`). This means peak memory during forward pass exceeds 1/N, but the steady-state footprint is 1/N.
+**Short:** FSDP2 shards each parameter as a DTensor, cutting resident state from 16 bytes/param per GPU (mixed-precision Adam) to 16/N, and AllGathers full parameters only around each layer's compute.
+In DDP with mixed-precision Adam, each GPU holds the whole bill for `P` parameters: 2P bytes of BF16 parameters + 2P of BF16 gradients + 12P of FP32 master weights and Adam `m`/`v` = 16P bytes (112 GB for 7B). With FSDP2's default configuration (`reshard_after_forward=True`) across N GPUs, each GPU holds 2P/N + 2P/N + 12P/N = 16P/N bytes — a linear memory reduction, 1.75 GB per GPU for 7B on 64 GPUs. FSDP2 shards each parameter individually as a `DTensor` rather than flattening a wrapping unit's parameters into one buffer, so parameters stay individually addressable. Before each forward pass, `fully_shard` issues AllGather to temporarily materialize the full parameter tensor on each GPU (then frees it after use, unless `reshard_after_forward=False`). This means peak memory during forward pass exceeds 1/N, but the steady-state footprint is 1/N.
 
 **Q: When is HSDP faster than full FSDP across all GPUs?**
 **Short:** When the model state fits in one node sharded 8 ways: HSDP keeps per-layer AllGather and ReduceScatter on NVLink and sends only one gradient AllReduce per step across nodes.
@@ -881,7 +904,7 @@ ZeRO (Zero Redundancy Optimizer, from DeepSpeed) progressively eliminates memory
 BF16 (Brain Float 16) and FP16 both use 2 bytes per value, but BF16 allocates 8 exponent bits (same as FP32) and 7 mantissa bits; FP16 allocates 5 exponent bits and 10 mantissa bits. The larger exponent range in BF16 (same as FP32) prevents the gradient underflow/overflow that requires GradScaler in FP16 training. LLM training frequently encounters large gradient values during attention head training — FP16 overflows to infinity, causing NaN loss and training instability. BF16 handles these ranges natively. BF16 is supported natively on A100, H100, TPU v3+, and RTX 30/40 series. For older GPUs (V100), FP16 + GradScaler is the only option.
 
 **Q: How do you implement checkpointing in distributed training without bugs?**
-**Short:** A full state dict is saved by rank 0 only; a sharded torch.distributed.checkpoint save runs on every rank, each writing its shard. Barrier after the save and unwrap DDP's .module.
+**Short:** Save a full state dict from rank 0 only or a sharded torch.distributed.checkpoint from every rank, then barrier after the save and unwrap DDP's .module.
 Three rules: (1) for a full state dict, only rank 0 writes, so gate `torch.save` with `if dist.get_rank() == 0`; for a sharded `torch.distributed.checkpoint.save`, call it on every rank, since each rank writes its own shard; (2) add a `dist.barrier()` after the save so no other rank proceeds until rank 0 finishes writing (prevents processes from loading a partially-written checkpoint); (3) save `model.module.state_dict()` (unwrap DDP) not `model.state_dict()`. For FSDP2: call `get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))` to gather all DTensor shards to rank 0's CPU RAM before saving; no context manager is needed. For large models, skip the gather and save the default `SHARDED_STATE_DICT` form with `torch.distributed.checkpoint.save` instead, which writes each rank's shard in parallel with zero communication and can be reloaded onto a different world size (resharding).
 
 **Q: What is the linear scaling rule and when does it break down?**
@@ -918,7 +941,7 @@ A NCCL hang is usually a collective mismatch — one rank calls a different coll
 
 **Q: How do you make recovery from a lost rank cheap in a multi-node training job?**
 **Short:** Save sharded DCP checkpoints often so a torchrun restart on fewer nodes reshards and resumes; PyTorch 2.14 adds experimental in-place process-group rebuild so survivors skip the restart.
-The baseline is a full group restart: the dead rank makes every other rank block in its next collective until the NCCL timeout (10 minutes by default), then `torchrun` kills all workers and relaunches them, up to `--max-restarts` times. Two things make that restart cheap. First, checkpoint with `torch.distributed.checkpoint` (DCP), where each rank writes its own shard and load reshards to whatever world size comes back, so with `--nnodes=MIN:MAX` the job resumes on 15 of 16 nodes instead of waiting for a replacement. Second, set the checkpoint interval from the failure rate: lost work per failure is on average half the interval, so a 30-minute interval on a cluster that loses a node daily costs about 15 minutes of compute per failure plus reload. PyTorch 2.14 (September 2026) adds experimental in-place process-group reconfiguration on Gloo and the `nccl2` backend: the surviving processes rebuild the group instead of exiting, so only the in-flight step is lost. Use the Flight Recorder dump, backend-agnostic since 2.14, to find which rank stopped at which collective before deciding it is a dead node rather than a collective mismatch.
+The baseline is a full group restart: the dead rank makes every other rank block in its next collective until the NCCL timeout (10 minutes by default), then `torchrun` kills all workers and relaunches them, up to `--max-restarts` times. Two things make that restart cheap. First, checkpoint with `torch.distributed.checkpoint` (DCP), where each rank writes its own shard and load reshards to whatever world size comes back, so with `--nnodes=MIN:MAX` the job resumes on 15 of 16 nodes instead of waiting for a replacement. Second, set the checkpoint interval from the failure rate: lost work per failure is on average half the interval, so a 30-minute interval on a cluster that loses a node daily costs about 15 minutes of compute per failure plus reload. PyTorch 2.14 (September 2026) adds experimental in-place process-group reconfiguration on Gloo and the rewritten NCCL backend (the `nccl2` preview in 2.14, the default `nccl` from 2.15): the surviving processes rebuild the group instead of exiting, so only the in-flight step is lost. Use the Flight Recorder dump, backend-agnostic since 2.14, to find which rank stopped at which collective before deciding it is a dead node rather than a collective mismatch.
 
 **Q: How does torchft keep training running when a node fails, and what does it need from the parallelism layout?**
 **Short:** It needs replicated groups (DDP or HSDP); a Lighthouse forms a per-step quorum of live groups, training continues without the failed group, and it rejoins by copying weights from a peer.
@@ -969,13 +992,13 @@ ZeRO-Infinity extends ZeRO-3 by offloading parameter and optimizer shards to CPU
 ZeRO-3 sharding (per rank holds 1/64 of):
   parameters  (fp16)   : 7B/64  ~ 110M
   gradients   (fp16)   : 7B/64
-  optimizer   (fp32 m,v): 7B/64    <- Adam states dominate memory
+  optimizer   (fp32 master,m,v): 7B/64  <- 12 of the 16 B/param
 
 forward/backward: all-gather params for the layer in use, then free
 global batch = micro(2) x grad_accum(4) x ranks(64) = 512
 ```
 
-Throughput 85 TFLOPS/GPU = ~57% Model FLOPs Utilization (MFU), strong for a 7B run at this scale. Checkpoints every 500 steps to object storage. Without ZeRO-3, a 7B model with Adam (params + grads + fp32 m/v + fp32 master ~ 16 bytes/param = 112GB) would not fit on a single 80GB GPU.
+Throughput 85 TFLOP/s per GPU is ~27% Model FLOPs Utilization (MFU) against the A100's 312 TFLOP/s dense BF16 peak (85 / 312), so there is headroom: at this scale the per-layer AllGather over 200 Gb/s InfiniBand is the usual limiter, and HSDP (shard within a node, replicate across nodes) is the first thing to try. Per rank, the resident state is 112 GB / 64 = 1.75 GB. Checkpoints every 500 steps to object storage. Without ZeRO-3, a 7B model with Adam (params + grads + fp32 m/v + fp32 master ~ 16 bytes/param = 112GB) would not fit on a single 80GB GPU.
 
 **DeepSpeed ZeRO-3 config and launch:**
 
@@ -1067,7 +1090,7 @@ ds_config["zero_optimization"]["overlap_comm"] = True
 
 **What does each ZeRO stage partition, and why does stage 3 enable 7B on 80GB GPUs?** Stage 1 partitions optimizer states, stage 2 adds gradients, stage 3 adds the parameters themselves. With Adam, optimizer states (fp32 momentum + variance + master weights) are the largest memory consumer; sharding all three across 64 ranks means each holds only 1/64 of everything, so the per-GPU footprint drops from ~112GB to single-digit GB plus transient all-gathered layers.
 
-**What is MFU and why is 57% considered good?** Model FLOPs Utilization is achieved FLOPs divided by the hardware peak. Communication, memory stalls, data loading, and bubble time all reduce it. For large distributed training, 50-60% MFU is strong; below 35% usually signals a data-loading or communication bottleneck worth profiling.
+**What is MFU and what does 27% tell you here?** Model FLOPs Utilization is achieved FLOPs divided by the hardware peak, so 85 TFLOP/s on a 312 TFLOP/s A100 is ~27%. Communication, memory stalls, data loading, and bubble time all reduce it. For large distributed training, 50-60% MFU is strong; below 35% usually signals a data-loading or communication bottleneck worth profiling, which is why this run's next step is a profiler trace of the ZeRO-3 AllGathers.
 
 **Why bf16 instead of fp16 for the 7B run?** bf16 has the same exponent range as fp32, so it avoids the gradient-underflow and overflow problems that force fp16 to use loss scaling. On A100 the throughput is comparable, and bf16 training is more numerically stable for large models, which is why it is the default for modern LLM pretraining.
 

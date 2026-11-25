@@ -681,6 +681,29 @@ A study that resumes from shared storage after `pip install -U optuna` crosses t
 **Pitfall 7 - Rebuilding a training image from `pip freeze` output**
 A team rebuilt a six-month-old training image from its `pip freeze` file to reproduce a regression. The file pinned `torch==2.5.1+cu118` but not the index, so the install failed; an engineer dropped the `+cu118` suffix and got PyPI's default `torch==2.5.1` wheel, built for CUDA 12.4, which the image's older NVIDIA driver could not run. `torch.cuda.is_available()` returned `False`, training silently fell back to CPU and ran 40x slower, and one transitive package resolved to a wheel built differently for the new base OS. Fix: lock with `uv lock` or a PEP 751 `pylock.toml` that records hashes and source indexes, install with `uv sync --locked`, pin the base image by digest, and log the lock file with every run.
 
+**Pitfall 3 as code: a run that records a path instead of data.**
+
+```python
+# BROKEN: the path's contents change every night; the run cannot be reproduced
+import mlflow
+import pandas as pd
+
+with mlflow.start_run():
+    df = pd.read_parquet("s3://lake/churn/train/")
+    mlflow.log_param("data_path", "s3://lake/churn/train/")
+```
+
+```python
+# FIX: read an immutable snapshot and log it as a dataset (source, digest, schema)
+SNAP = "s3://lake/churn/train/snapshot=2026-11-24/"
+with mlflow.start_run():
+    df = pd.read_parquet(SNAP)
+    ds = mlflow.data.from_pandas(df, source=SNAP, name="churn_train")
+    mlflow.log_input(ds, context="training")
+```
+
+The broken run looks complete in the UI: it has a data parameter and the right metrics. Six weeks later the same path returns different rows, and nothing in the run says which rows it trained on. `mlflow.log_input` records the source, a content digest and the schema with the run, so a changed dataset shows up as a different digest instead of a mystery regression.
+
 ---
 
 ## 11. Technologies & Tools

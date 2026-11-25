@@ -889,6 +889,32 @@ A team showed business stakeholders GAT attention weights as "feature importance
 **Pitfall 6 — Ignoring edge features:**
 A knowledge graph GNN ignored relation types on edges (is-a, works-for, located-in treated identically). Performance on link prediction was 15% below a relation-aware model (R-GCN). Fix: use edge-conditioned convolutions or RGCN when edge types carry semantic information.
 
+**Pitfall 1 as code: test nodes inside the training graph.**
+
+```python
+# BROKEN: random node masks on one static graph; message passing reaches test nodes
+import torch
+
+perm = torch.randperm(data.num_nodes)
+train_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
+train_mask[perm[: int(0.8 * data.num_nodes)]] = True
+out = model(data.x, data.edge_index)            # test nodes and their edges are all here
+loss = loss_fn(out[train_mask], data.y[train_mask])
+```
+
+```python
+# FIX: temporal, inductive split -- train on the subgraph that existed before the cutoff
+from torch_geometric.utils import subgraph
+
+train_nodes = (data.ts < cutoff).nonzero().view(-1)
+ei_train, _ = subgraph(train_nodes, data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes)
+out = model(data.x[train_nodes], ei_train)
+loss = loss_fn(out, data.y[train_nodes])
+# test: score model(data.x, data.edge_index)[data.ts >= cutoff], as production would
+```
+
+In the broken split, each training node aggregates features from test-period neighbours, and in a fraud graph those neighbours carry signals that only exist because the fraud was later detected. The reported AUC is excellent and does not survive deployment. Building the training graph from nodes before the cutoff removes every edge that production would not have had.
+
 ---
 
 ## 11. Technologies & Tools

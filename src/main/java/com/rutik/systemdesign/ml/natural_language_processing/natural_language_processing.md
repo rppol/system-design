@@ -50,6 +50,15 @@ Key insight: TF-IDF and logistic regression stay competitive with fine-tuned BER
 4. Structural prediction needs structured models — sequence labeling tasks (NER, POS) benefit from CRF output layers that enforce label consistency (e.g., I-PER cannot follow B-LOC).
 5. Evaluation is task-specific — accuracy for classification; F1 for NER; perplexity for language models; coherence for topic models.
 
+**Principles 1 and 3 in numbers — what IDF does to a common word.** scikit-learn's `TfidfVectorizer` (default `smooth_idf=True`) uses `idf(t) = ln((1 + n) / (1 + df(t))) + 1`. In a corpus of n = 10,000 documents:
+
+```
+"chargeback", in 100 documents:   ln(10,001 / 101)   + 1 = 4.595 + 1 = 5.60
+"the",        in 9,900 documents: ln(10,001 / 9,901) + 1 = 0.010 + 1 = 1.01
+```
+
+One occurrence of "chargeback" outweighs 5.5 occurrences of "the", so a representation built on raw counts would be dominated by function words, while TF-IDF puts the weight on the terms that distinguish documents. The `+ 1` keeps a word that appears in every document at weight 1 rather than 0; set `sublinear_tf=True` as well to replace a raw count of 20 with `1 + ln(20) = 4.0`, so long documents that repeat a term do not swamp short ones.
+
 ---
 
 ## 4. Types / Architectures / Strategies
